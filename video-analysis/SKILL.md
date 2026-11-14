@@ -1,0 +1,94 @@
+---
+name: video-analysis
+description: Analyse a local video file - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Works fully offline on Windows without system ffmpeg.
+---
+
+# Video analysis — what is seen, what is said
+
+You have **no direct video or audio input**. You read **images extracted from the video** and a
+**transcript of its audio**. Everything below turns a video into those two things, then tells you
+how to read them without overclaiming.
+
+## Where things go — the owner's hard rule
+
+All extracted material goes into **one working folder next to the video**:
+`<folder of the video>\<video name>.analysis\` — never into a scratchpad, a temp dir or the project.
+The owner deletes it when the work on that video is done, to reclaim disk space.
+**Never delete it yourself.** If asked to clean up, use the `trash` skill on exactly that folder
+(Recycle Bin, never `rm`). Your *written analysis* (the deliverable) belongs where the project wants
+it, not inside the `.analysis` folder, so that trashing the folder loses nothing of value.
+
+## 1. Tools (once per machine)
+
+```bash
+python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # verify
+python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
+```
+Installs with `pip --user`: `imageio-ffmpeg` (a bundled ffmpeg binary — no system ffmpeg, no admin,
+no winget/choco), `Pillow`, `numpy`, `faster-whisper`, and caches the Whisper `small` model (the
+only network access; afterwards everything is offline). Exit 0 = `READY`.
+
+Self-test (synthetic video, 9 checks, `--full` adds Whisper):
+`python ~/.claude/skills/video-analysis/scripts/selftest.py`
+
+## 2. Extract
+
+```bash
+python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" --language fr
+```
+Run it in the **background** for videos longer than a few minutes: transcription runs ~5x faster
+than real time on CPU (a 15 min video takes ~3 min). Options: `--interval 5` (seconds between
+frames; use 2 for fast-moving screens, 10-15 for talking heads), `--model small` (`medium` = better,
+3x slower), `--skip-frames`, `--skip-transcript`, `--at HH:MM:SS[.mmm]` (repeatable, full-resolution
+frame at an exact instant — used in step 3d).
+
+Produces in `<video>.analysis\`: `frames\` (every interval), `sheets\` (3x3 contact sheets, each
+image stamped mm:ss in yellow), `keyframes.txt` + `keysheets\` (only frames that visibly changed —
+the slide/screen changes), `audio.wav`, `transcript.txt` (`[mm:ss] text`) + `transcript.json`,
+`at\`, `manifest.json`. Re-running resumes and skips finished stages; changed parameters or a
+different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = processing failure,
+2 = bad input.
+
+## 3. Read — in this order
+
+a. **The whole transcript first** (`transcript.txt`). In courses and demos, the decisive content
+   (numbers, rules, exceptions, the real method) is very often **in the voice, not on screen**.
+b. **The key-frame sheets** (`keysheets\`) to see each distinct slide/screen once.
+c. **The contact sheets** (`sheets\`) — all of them, in order, to follow what moves between key
+   frames (cursor, drawings, charts updating).
+d. **Zoom where the speech points**: when the speaker says "here", "this candle", "look at…",
+   re-run with `--at <timestamp>` **and the same options as the first run** (otherwise the manifest
+   check refuses with exit 3), then read that full-resolution frame. Sheets are 640 px per cell —
+   too small for chart labels or small text.
+e. Write the analysis (step 4).
+
+## 4. Report — keep three things apart
+
+For each passage, cite **timestamps** and label every statement as one of:
+- **ON SCREEN** — what an image actually shows (slide text, chart, annotation, UI).
+- **SAID** — what the voice states (quote or close paraphrase, with `[mm:ss]`).
+- **INFERENCE** — your interpretation linking the two. Never present it as seen or said.
+
+Always include:
+- the **gaps between what is written and what is said** (e.g. a slide says one thing and the voice
+  adds the rule that actually matters, or contradicts it);
+- what is **only shown once** (a single demonstrated example is an illustration, not evidence);
+- **limits**: frames are sampled every N s and can miss brief events; a frame's stamp is its index
+  × interval, so it is approximate (± half an interval, more on variable-frame-rate recordings); key-frame dedup can hide small
+  edits; Whisper misspells names and jargon (check against the images); no reliable reading of tone,
+  emotion, music, speaker identity or motion.
+
+## 5. Afterwards
+
+Tell the user the working folder path and its size (printed at the end of the extraction). Leave it
+in place until they say the work on the video is finished; then trash it with the `trash` skill.
+
+## Known pitfalls (already handled by the scripts)
+
+- `faster_whisper` `model.transcribe("<path>")` raises
+  `TypeError: open() got an unexpected keyword argument 'metadata_errors'` with recent PyAV. The script
+  extracts 16 kHz mono PCM16 WAV with ffmpeg and passes a float32 array instead.
+- `imageio-ffmpeg` ships ffmpeg but no ffprobe: duration and audio presence are read from ffmpeg's
+  own banner.
+- Scene detection via `select='gt(scene,N)'` + `showinfo` prints nothing under `-loglevel error`;
+  key frames use thumbnail differences instead.
