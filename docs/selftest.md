@@ -1,0 +1,49 @@
+# Self-test — `selftest.py`
+
+`video-analysis/scripts/selftest.py` checks, in one command and without a real video, that the skill
+works on the current machine. The project has no pytest dependency: this script **is** its test
+suite.
+
+## What it does
+
+1. Builds a 20-second synthetic video: two static shots of different colours (cut at 10 s) with a
+   440 Hz tone.
+2. Runs `extract_video.py` on it several times.
+3. Prints `PASS` or `FAIL` for each check, then the folder holding its test files.
+
+| Check | What it proves |
+|---|---|
+| first run exit 0 | the pipeline runs end to end |
+| folder created next to the video | the working folder lands beside the video, nowhere else |
+| 4 frames at 5 s interval | frame sampling follows `--interval` |
+| 1 contact sheet | contact sheets are built |
+| scene change detected (2 key frames) | key-frame detection keeps changes and drops duplicates |
+| exact frame at 00:00:12.250 | `--at` extracts a frame at an exact instant |
+| audio detected | the audio stream is found |
+| rerun exit 0 and frames untouched | a rerun resumes without redoing finished work |
+| changed parameters refused with exit 3 | a guard refuses to mix outputs made with other settings |
+| non-empty folder without manifest refused with exit 3 | a guard refuses to adopt a folder it did not create |
+| *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
+| *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
+
+The two refusal checks matter: a guard that has never been seen refusing proves nothing.
+
+## When to run it
+
+- **After installing** on a new machine, right after `setup_tools.py`.
+- **Before every release**, to make sure an improvement broke nothing.
+
+## Usage
+
+```bash
+python video-analysis/scripts/selftest.py            # fast, no transcription (no model needed)
+python video-analysis/scripts/selftest.py --full     # also runs Whisper (model downloaded once)
+python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where test files go
+```
+
+Exit code `0` = every check passed, `1` = at least one failed.
+
+## Cleanup
+
+Test files go to a fresh folder in the system temp directory (or `--work-dir`), printed at the end.
+The script never deletes anything: send that folder to the Recycle Bin when you no longer need it.

@@ -19,6 +19,13 @@ python video-analysis/scripts/setup_tools.py        # installs tools, caches the
 python video-analysis/scripts/selftest.py           # 10 checks on a synthetic video
 ```
 
+## Self-test
+
+`selftest.py` checks in one command, without a real video, that the skill works on your machine:
+it builds a 20 s synthetic video, runs the extraction on it and reports `PASS`/`FAIL` on 10 checks,
+including the two cases where the tool must **refuse**. Run it after installing and before every
+release; `--full` also tests transcription. Details: [docs/selftest.md](docs/selftest.md).
+
 ## Use
 
 In Claude Code: "analyse this video: <path>". Or directly:

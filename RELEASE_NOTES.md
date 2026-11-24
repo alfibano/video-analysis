@@ -1,5 +1,11 @@
 # Release notes — video-analysis
 
+## Unreleased
+
+### Documentation
+- `docs/selftest.md`: what the self-test checks, when to run it, usage, cleanup; presented in the
+  README.
+
 ## v0.1.0 — 2026-11-14 — first release
 
 A Claude Code skill that turns a local video into what an agent can read: sampled frames,
@@ -68,7 +74,10 @@ read). Ordered by expected value.
 6. **SRT output** and word-level timestamps. Seen in: vidwise.
 7. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
    Seen in: talkthrough-mcp, media-context-mcp, VideoContext MCP.
-8. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
+8. **Multilingual documentation** — README, docs and release notes in English (default), French
+   and Spanish at least, with a language switcher at the top of each page. Owner request,
+   2026-11-14.
+9. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
    the agent already describes images. Seen in: Framesleuth.
 
 Survey sources: [claude-video](https://github.com/bradautomates/claude-video) ·
