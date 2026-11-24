@@ -1,18 +1,10 @@
-"""Self-test of extract_video.py on a synthetic 20 s video (two static shots + tone, cut at 10 s).
-
-Usage:
-    python selftest.py [--full] [--work-dir DIR]
-
-  --full       also run Whisper (downloads the model once); default skips the transcript
-  --work-dir   where to create the synthetic video (default: a fresh folder in the system temp dir)
-
-Prints PASS/FAIL per check and the folder to send to the Recycle Bin afterwards. Exit 0 if all pass.
-"""
+"""Check the video-analysis tools and extraction flow; run with -h for details."""
 from __future__ import annotations
 
 import argparse
 import ast
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -234,6 +226,49 @@ def check_documentation_contract() -> bool:
                for text in (skill, readme))
 
 
+def check_script_help_contract() -> bool:
+    scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py")
+    for script in scripts:
+        result = subprocess.run([sys.executable, str(HERE / script), "-h"],
+                                capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return False
+        output = result.stdout
+        if any(len(line) > 79 for line in output.splitlines()):
+            return False
+        if "Exit codes:" not in output:
+            return False
+        options_start = output.find("options:")
+        if options_start < 0:
+            return False
+        description = output[:options_start]
+        if len(re.findall(r"(?<=[.!?])\s+[A-Z]", description)) < 1:
+            return False
+        lines = output.splitlines()
+        for section in ("positional arguments:", "options:"):
+            try:
+                start = lines.index(section) + 1
+            except ValueError:
+                if section == "positional arguments:" and script in {"setup_tools.py", "selftest.py"}:
+                    continue
+                return False
+            end = next((index for index in range(start, len(lines))
+                        if lines[index] in {"positional arguments:", "options:"}
+                        or lines[index].startswith("Example:")
+                        or lines[index].startswith("Exit codes:")), len(lines))
+            entries = [index for index in range(start, end)
+                       if re.match(r"^  \S", lines[index])]
+            for index in entries:
+                line = lines[index]
+                has_inline_help = bool(re.search(r"\S\s{2,}\S", line))
+                next_entry = next((candidate for candidate in entries if candidate > index), end)
+                has_wrapped_help = any(re.match(r"^\s{4,}\S", following)
+                                       for following in lines[index + 1:next_entry])
+                if not has_inline_help and not has_wrapped_help:
+                    return False
+    return True
+
+
 def make_offset_video(target: Path) -> None:
     from tools import resolve_ffmpeg
     ffmpeg = resolve_ffmpeg().path
@@ -279,10 +314,24 @@ def extract(video: Path, *extra: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--full", action="store_true")
-    parser.add_argument("--work-dir", type=Path)
-    parser.add_argument("--network", metavar="URL", help="also fetch and extract one real URL")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("Build a synthetic video and check the extraction pipeline and\n"
+                     "related offline contracts.\n"
+                     "Reads the installed tools and writes test outputs beside a\n"
+                     "generated video in a temporary folder or the selected work\n"
+                     "directory; it never deletes files.\n"
+                     "Run after setup_tools.py and before analyzing real videos;\n"
+                     "the default run is offline."),
+        epilog=("Example: python selftest.py --work-dir .video-test\n"
+                "Exit codes: 0 all checks passed; 1 one or more checks failed;\n"
+                "2 invalid arguments."))
+    parser.add_argument("--full", action="store_true",
+                        help="also run Whisper transcription and use its cached or downloaded model")
+    parser.add_argument("--work-dir", type=Path,
+                        help="folder for synthetic video and analysis (default: a fresh system temp folder)")
+    parser.add_argument("--network", metavar="URL",
+                        help="also fetch and extract one real online video URL")
     args = parser.parse_args()
     folder = args.work_dir or Path(tempfile.mkdtemp(prefix="video-analysis-selftest-"))
     folder.mkdir(parents=True, exist_ok=True)
@@ -330,6 +379,7 @@ def main() -> int:
         checks["playlist and live are refused before download"] = check_playlist_live_refusal()
         checks["default selftest is offline"] = check_default_offline()
         checks["documentation contract current"] = check_documentation_contract()
+        checks["every script help describes itself"] = check_script_help_contract()
         checks["offset container PTS preserved"] = check_offset_pts(folder)
         if args.network:
             checks["network fetch and extract"] = check_network_fetch(args.network, folder / "network")

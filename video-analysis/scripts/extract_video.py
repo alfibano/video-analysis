@@ -1,26 +1,4 @@
-"""Extract what a video SHOWS (sampled frames, contact sheets, key frames) and SAYS (timestamped
-transcript), into a working folder created NEXT TO THE VIDEO: <video dir>/<video stem>.analysis/
-
-Usage:
-    python extract_video.py VIDEO [--interval 5] [--dedup-threshold 6] [--model small]
-                                  [--language auto|fr|en|...] [--skip-frames] [--skip-transcript]
-                                  [--at HH:MM:SS[.mmm]]...
-
-Outputs (all inside the .analysis folder, nothing anywhere else except pip/model caches):
-    frames/f00001.jpg ...   one frame every --interval seconds, 960 px wide
-    sheets/sheet00.jpg ...  3x3 contact sheets, each frame stamped with its mm:ss time
-    keyframes.txt           frames that differ visibly from the previous one (slide changes)
-    keysheets/              contact sheets of the key frames only
-    audio.wav               16 kHz mono PCM16
-    transcript.json/.txt    timestamped segments
-    at/at_00h01m23s500.jpg  full-resolution frames at exact --at times
-    manifest.json           source identity, parameters, durations, stage status
-
-Re-running resumes: finished stages are skipped. If the video or the parameters changed, it stops
-(exit 3) rather than mixing outputs - send the old folder to the Recycle Bin first.
-
-Exit codes: 0 success, 1 processing failure, 2 usage or input error, 3 manifest conflict.
-"""
+"""Extract frames and a timestamped transcript; run with -h for details."""
 from __future__ import annotations
 
 import argparse
@@ -254,17 +232,29 @@ def folder_megabytes(folder: Path) -> float:
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract frames and transcript next to a video.")
-    parser.add_argument("video", type=Path)
-    parser.add_argument("--interval", type=float, default=5.0, help="seconds between frames (default 5)")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("Extract sampled frames, contact sheets, visible scene changes,\n"
+                     "and an offline timestamped transcript from one local video.\n"
+                     "Reads the video and a cached Whisper model, then writes all results into\n"
+                     "<video folder>/<video name>.analysis/; it never deletes files.\n"
+                     "Run setup_tools.py and selftest.py first when preparing a machine;\n"
+                     "afterward read transcript.txt and the key-frame sheets, then review\n"
+                     "the contact sheets."),
+        epilog=("Example: python extract_video.py \"lecture.mp4\" --interval 5 --language fr\n"
+                "Exit codes: 0 success; 1 processing failure; 2 usage or input error;\n"
+                "3 manifest conflict."))
+    parser.add_argument("video", type=Path, help="local video file to analyze")
+    parser.add_argument("--interval", type=float, default=5.0,
+                        help="seconds between sampled frames (default: %(default)s)")
     parser.add_argument("--dedup-threshold", type=float, default=6.0,
-                        help="mean grey difference 0-255 for a key frame (default 6)")
-    parser.add_argument("--model", default="small", help="Whisper model (default small)")
-    parser.add_argument("--language", default="auto", help="auto, fr, en, ... (default auto)")
-    parser.add_argument("--skip-frames", action="store_true")
-    parser.add_argument("--skip-transcript", action="store_true")
+                        help="mean grey difference 0-255 for a key frame (default: %(default)s)")
+    parser.add_argument("--model", default="small", help="Whisper model name (default: %(default)s)")
+    parser.add_argument("--language", default="auto", help="transcript language, such as auto, fr, or en (default: %(default)s)")
+    parser.add_argument("--skip-frames", action="store_true", help="skip frame and contact-sheet extraction")
+    parser.add_argument("--skip-transcript", action="store_true", help="skip audio transcription")
     parser.add_argument("--at", type=parse_time, action="append", default=[],
-                        help="extra full-resolution frame at HH:MM:SS[.mmm]; repeatable")
+                        help="also save a full-resolution frame at HH:MM:SS[.mmm]; repeatable")
     return parser.parse_args()
 
 

@@ -1,16 +1,4 @@
-"""Install dependencies and check the video-analysis tools.
-
-Usage:
-    python setup_tools.py [--check] [--model NAME] [--no-model-download]
-
-Flags:
-    --check              Report readiness without installing packages or downloading a model.
-                         Reports ffmpeg, yt-dlp, and JavaScript runtime paths and origins.
-    --model NAME         Whisper model to cache or check (default: small).
-    --no-model-download  Skip checking/caching the Whisper model.
-
-Exit codes: 0 ready, 1 dependency/tool/model failure, 2 invalid arguments.
-"""
+"""Install and check video-analysis tools; run with -h for details."""
 from __future__ import annotations
 
 import argparse
@@ -99,10 +87,22 @@ def cache_model(name: str) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Bootstrap the tools of the video-analysis skill.")
-    parser.add_argument("--check", action="store_true")
-    parser.add_argument("--model", default="small")
-    parser.add_argument("--no-model-download", action="store_true")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("Install missing video-analysis packages and check ffmpeg, yt-dlp, and\n"
+                     "a JavaScript runtime, or check their availability without installing.\n"
+                     "Reads the local tool environment and writes missing packages or the\n"
+                     "cached Whisper model; installation and first-time model caching use\n"
+                     "the network.\n"
+                     "After setup, run selftest.py to check the skill with a synthetic video."),
+        epilog=("Example: python setup_tools.py --check --no-model-download\n"
+                "Exit codes: 0 ready; 1 dependency, tool, or model failure; 2 invalid arguments."))
+    parser.add_argument("--check", action="store_true",
+                        help="report tool readiness without installing packages")
+    parser.add_argument("--model", default="small",
+                        help="Whisper model to cache or check (default: %(default)s)")
+    parser.add_argument("--no-model-download", action="store_true",
+                        help="skip checking or caching the Whisper model")
     try:
         args = parser.parse_args()
     except SystemExit as exit_signal:

@@ -119,10 +119,23 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
 
 
 def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]], Any] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Download one video and prepare analysis metadata.")
-    parser.add_argument("url")
-    parser.add_argument("--dest", type=Path, default=Path.cwd())
-    parser.add_argument("--sub-langs", nargs="+", help="subtitle languages (default: video language and en)")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("Fetch one online video, refusing playlists and live or upcoming\n"
+                     "streams.\n"
+                     "Reads a video URL and network metadata, then writes the video into\n"
+                     "--dest and subtitles, metadata, and manifest into\n"
+                     "<video folder>/<video name>.analysis/. It never deletes files.\n"
+                     "Next, run extract_video.py on the downloaded video to create\n"
+                     "frames and a transcript."),
+        epilog=("Example: python fetch_video.py \"https://example.com/video\" --dest videos\n"
+                "Exit codes: 0 success; 1 download or tool failure; 2 invalid\n"
+                "arguments; 3 unsupported URL."))
+    parser.add_argument("url", help="URL of one online video")
+    parser.add_argument("--dest", type=Path, default=Path("."),
+                        help="folder for the downloaded video (default: %(default)s)")
+    parser.add_argument("--sub-langs", nargs="+", metavar="LANG",
+                        help="subtitle languages to save (default: the video's language and en)")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
