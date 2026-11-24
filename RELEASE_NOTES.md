@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+### Added
+- `fetch_video.py` downloads one video URL, refuses playlists/live streams, saves normalized and raw
+  metadata, subtitles, SponsorBlock marks without removing video segments, and a v2 hand-off manifest.
+- `extract_video.py` accepts fetch manifests, migrates v0.1 manifests, and writes container PTS to
+  `frames.json` for timestamp labels.
+- `setup_tools.py --check` reports tool paths and origins; self-test adds offline hand-off checks and
+  optional `--network URL` fetch plus extraction.
+
 ### Documentation
 - `docs/selftest.md`: what the self-test checks, when to run it, usage, cleanup; presented in the
-  README.
+  README. The skill and README document URL fetch, tool setup, subtitles, and exact frame timestamps.
 
 ## v0.1.0 — 2026-11-14 — first release
 
@@ -49,7 +57,7 @@ overclaiming.
 - Key-frame dedup can hide small edits on a slide.
 - The Whisper model is downloaded once into the standard Hugging Face cache (outside the working
   folder, by design).
-- Local files only; no URLs.
+- Network downloads are limited to one non-live video URL; playlists and live streams are refused.
 
 ---
 
@@ -69,15 +77,13 @@ read). Ordered by expected value.
    frame cap; alongside the fixed interval. Seen in: claude-video (cap 100), claude-real-video.
 4. **Detail levels** — transcript-only / key frames / full, to spend only what the question needs.
    Seen in: claude-video.
-5. **URLs and existing captions** — `yt-dlp`, reuse published subtitles before transcribing.
-   Seen in: claude-video, claude-watch, VideoContext MCP.
-6. **SRT output** and word-level timestamps. Seen in: vidwise.
-7. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
+5. **SRT output** and word-level timestamps. Seen in: vidwise.
+6. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
    Seen in: talkthrough-mcp, media-context-mcp, VideoContext MCP.
-8. **Multilingual documentation** — README, docs and release notes in English (default), French
+7. **Multilingual documentation** — README, docs and release notes in English (default), French
    and Spanish at least, with a language switcher at the top of each page. Owner request,
    2026-11-14.
-9. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
+8. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
    the agent already describes images. Seen in: Framesleuth.
 
 Survey sources: [claude-video](https://github.com/bradautomates/claude-video) ·

@@ -5,8 +5,8 @@ what is **seen** (sampled frames, timestamped contact sheets, screen changes, ex
 what is **said** (offline timestamped transcript), with a procedure to report both cross-referenced
 by timestamp — keeping what is on screen, what is said, and what is inferred apart.
 
-Fully offline after a one-time model download. No system ffmpeg, no admin rights: tested on
-Windows 11 with Python 3.12.
+Local analysis works offline after a one-time model download. URL fetching is an explicit network
+step. No system ffmpeg or admin rights: tested on Windows 11 with Python 3.12.
 
 ## Install
 
@@ -16,15 +16,18 @@ git clone https://github.com/alfibano/video-analysis.git
 #   mklink /J "%USERPROFILE%\.claude\skills\video-analysis" "<clone>\video-analysis"
 # or copy the video-analysis/ folder into ~/.claude/skills/
 python video-analysis/scripts/setup_tools.py        # installs tools, caches the Whisper model
-python video-analysis/scripts/selftest.py           # 10 checks on a synthetic video
+python video-analysis/scripts/setup_tools.py --check # verifies tools and their origins
+python video-analysis/scripts/selftest.py           # offline checks on a synthetic video
 ```
 
 ## Self-test
 
 `selftest.py` checks in one command, without a real video, that the skill works on your machine:
-it builds a 20 s synthetic video, runs the extraction on it and reports `PASS`/`FAIL` on 10 checks,
-including the two cases where the tool must **refuse**. Run it after installing and before every
-release; `--full` also tests transcription. Details: [docs/selftest.md](docs/selftest.md).
+it builds a 20 s synthetic video, runs the extraction on it and reports `PASS`/`FAIL` on named checks,
+including cases where the tool must **refuse**. Run it after installing and before every
+release; `--full` also tests transcription. The default run stays offline; `--network URL` opts into
+a real fetch and extraction (`python video-analysis/scripts/selftest.py --network "<url>"`). Details:
+[docs/selftest.md](docs/selftest.md).
 
 ## Use
 
@@ -33,6 +36,17 @@ In Claude Code: "analyse this video: <path>". Or directly:
 ```bash
 python video-analysis/scripts/extract_video.py "<video>" --language fr --interval 5
 ```
+
+For a URL, download one non-live video first, then extract it:
+
+```bash
+python video-analysis/scripts/fetch_video.py "<url>" --dest "<folder>"
+python video-analysis/scripts/extract_video.py "<folder>/<video>.mp4" --language fr --interval 5
+```
+
+Fetch writes normalized `metadata.json`, sanitized `raw_info.json`, available subtitle files,
+`sponsorblock.json` (segments marked, never removed), and a v2 manifest. Extract writes container
+timestamps in `frames.json` alongside the frames and transcript.
 
 Everything goes to `<video folder>/<video name>.analysis/` — frames, sheets, key frames, audio,
 transcript, manifest — so it can be deleted in one go when you are done. The scripts never delete

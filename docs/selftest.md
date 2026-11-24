@@ -1,8 +1,8 @@
 # Self-test — `selftest.py`
 
-`video-analysis/scripts/selftest.py` checks, in one command and without a real video, that the skill
-works on the current machine. The project has no pytest dependency: this script **is** its test
-suite.
+`video-analysis/scripts/selftest.py` checks the skill without a real video. The project has no
+pytest dependency: this script **is** its test suite. Its default run never imports `yt_dlp` or
+opens a network connection; a real URL run is explicit with `--network URL`.
 
 ## What it does
 
@@ -23,6 +23,11 @@ suite.
 | rerun exit 0 and frames untouched | a rerun resumes without redoing finished work |
 | changed parameters refused with exit 3 | a guard refuses to mix outputs made with other settings |
 | non-empty folder without manifest refused with exit 3 | a guard refuses to adopt a folder it did not create |
+| fetch manifest accepted by extract | v2 hand-off retains fetch data while extract records its own settings |
+| v0.1 manifest remains compatible | older flat manifests are migrated to v2 in memory |
+| playlist and live are refused before download | a fake yt-dlp confirms preflight happens before downloading |
+| default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
+| documentation contract current | usage docs mention fetch, tool checks, network self-test and `frames.json` |
 | *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
 | *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
 
@@ -39,9 +44,11 @@ The two refusal checks matter: a guard that has never been seen refusing proves 
 python video-analysis/scripts/selftest.py            # fast, no transcription (no model needed)
 python video-analysis/scripts/selftest.py --full     # also runs Whisper (model downloaded once)
 python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where test files go
+python video-analysis/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
 ```
 
 Exit code `0` = every check passed, `1` = at least one failed.
+Network mode writes its download under `<work-dir>/network` (or the fresh test folder).
 
 ## Cleanup
 

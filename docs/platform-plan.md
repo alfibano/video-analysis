@@ -1,6 +1,6 @@
 # Platform evolution — design and step 1 plan
 
-Status: **planned, not implemented** (2026-11-23).
+Status: **step 1 implemented** (2026-11-24).
 
 ## Vision
 Turn the `video-analysis` skill into a learning platform: from a local or online video, produce a

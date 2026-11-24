@@ -21,17 +21,37 @@ it, not inside the `.analysis` folder, so that trashing the folder loses nothing
 ## 1. Tools (once per machine)
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # verify
+python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # verify tools and origins
 python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
 ```
-Installs with `pip --user`: `imageio-ffmpeg` (a bundled ffmpeg binary — no system ffmpeg, no admin,
-no winget/choco), `Pillow`, `numpy`, `faster-whisper`, and caches the Whisper `small` model (the
-only network access; afterwards everything is offline). Exit 0 = `READY`.
+Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
+`faster-whisper`, `yt-dlp[default]`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
+system ffmpeg is found; then caches the Whisper `small` model. Tool resolution: environment override
+(`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
+JavaScript runtime (Deno, else Node). `--check` prints each tool with its origin. Exit 0 = `READY`.
+Network is used only by setup and by `fetch_video.py`; local analysis is offline.
 
-Self-test (synthetic video, 9 checks, `--full` adds Whisper):
+Self-test (synthetic video and offline contract checks, `--full` adds Whisper):
 `python ~/.claude/skills/video-analysis/scripts/selftest.py`
 
-## 2. Extract
+Optional real URL check (downloads and extracts a video):
+`python ~/.claude/skills/video-analysis/scripts/selftest.py --network "<URL>"`
+
+## 2. Fetch or extract
+
+For an online video, fetch it first. Playlists and live/upcoming streams are refused before any
+download. The video remains intact; SponsorBlock segments are marked in `sponsorblock.json` and
+never removed.
+
+```bash
+python ~/.claude/skills/video-analysis/scripts/fetch_video.py "<URL>" --dest "<folder>"
+```
+
+By default subtitles for the video's language and English are saved when available. Choose other
+languages with `--sub-langs fr en`. Fetch writes `metadata.json`, sanitized `raw_info.json`,
+subtitle files, `sponsorblock.json`, and a v2 `manifest.json` into `<video>.analysis/`.
+
+For a local video, or after fetching a URL, extract frames and transcript:
 
 ```bash
 python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" --language fr
@@ -42,10 +62,10 @@ frames; use 2 for fast-moving screens, 10-15 for talking heads), `--model small`
 3x slower), `--skip-frames`, `--skip-transcript`, `--at HH:MM:SS[.mmm]` (repeatable, full-resolution
 frame at an exact instant — used in step 3d).
 
-Produces in `<video>.analysis\`: `frames\` (every interval), `sheets\` (3x3 contact sheets, each
-image stamped mm:ss in yellow), `keyframes.txt` + `keysheets\` (only frames that visibly changed —
-the slide/screen changes), `audio.wav`, `transcript.txt` (`[mm:ss] text`) + `transcript.json`,
-`at\`, `manifest.json`. Re-running resumes and skips finished stages; changed parameters or a
+Produces in `<video>.analysis\`: `frames\` (every interval) with their exact container timestamps
+in `frames.json`, `sheets\` (3x3 contact sheets, each image stamped hh:mm:ss.mmm in yellow),
+`keyframes.txt` + `keysheets\` (only frames that visibly changed — the slide/screen changes),
+`audio.wav`, `transcript.txt` (`[mm:ss] text`) + `transcript.json`, `at\`, `manifest.json`. Re-running resumes and skips finished stages; changed extraction parameters or a
 different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = processing failure,
 2 = bad input.
 

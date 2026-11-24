@@ -11,6 +11,7 @@ Prints PASS/FAIL per check and the folder to send to the Recycle Bin afterwards.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import subprocess
 import sys
@@ -99,6 +100,140 @@ def check_metadata_fixture() -> bool:
             and empty.get("upload_date") is None and empty.get("chapters") == [] and empty.get("tags") == [])
 
 
+def check_fetch_manifest() -> bool:
+    try:
+        import fetch_video
+        from extract_video import load_manifest
+    except ImportError:
+        return False
+    dest = Path(tempfile.mkdtemp(prefix="video-analysis-manifest-"))
+    info = {"_type": "video", "id": "test-id", "title": "Sample video", "language": "fr",
+            "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": []}
+    calls: list[bool] = []
+    option_sets: list[dict] = []
+
+    class FakeYDL:
+        def __init__(self, options: dict) -> None:
+            self.options = options
+            option_sets.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def extract_info(self, url: str, *, download: bool):
+            calls.append(download)
+            if download:
+                video = dest / "Sample_video_test-id.mp4"
+                video.write_bytes(b"fake video")
+                info["requested_downloads"] = [{"filepath": str(video)}]
+            return info
+
+        def sanitize_info(self, value: dict) -> dict:
+            return value
+
+        def prepare_filename(self, value: dict) -> str:
+            return str(dest / "Sample_video_test-id.mp4")
+
+    if fetch_video.main(["https://example.invalid/video", "--dest", str(dest)], ydl_factory=FakeYDL) != 0:
+        return False
+    video = dest / "Sample_video_test-id.mp4"
+    folder = dest / f"{video.stem}.analysis"
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    accepted = load_manifest(folder, manifest["source"], {"interval": 5})
+    preflight_pp = option_sets[0].get("postprocessors", [])
+    download_pp = option_sets[1].get("postprocessors", [])
+    sponsorblock_pp = [pp for pp in download_pp if pp.get("key") == "SponsorBlock"]
+    has_sponsorblock = (not preflight_pp and len(sponsorblock_pp) == 1
+                        and sponsorblock_pp[0].get("categories") == fetch_video.SPONSOR_CATEGORIES
+                        and sponsorblock_pp[0].get("when") == "after_filter"
+                        and all(pp.get("key") not in {"ModifyChapters", "SponsorBlockRemove"}
+                                and "remove" not in pp for pp in download_pp)
+                        and "sponsorblock_mark" not in option_sets[1]
+                        and "sponsorblock_remove" not in option_sets[1])
+    return (calls == [False, True] and video.is_file() and (folder / "metadata.json").is_file()
+            and manifest["params"]["fetch"]["url"].startswith("https://")
+            and "fetch" in accepted["stages"] and has_sponsorblock)
+
+
+def check_legacy_manifest() -> bool:
+    try:
+        from extract_video import load_manifest
+    except ImportError:
+        return False
+    folder = Path(tempfile.mkdtemp(prefix="video-analysis-legacy-"))
+    (folder / "manifest.json").write_text(json.dumps({
+        "source": {"path": "video.mp4"}, "params": {"interval": 5}, "stages": {},
+    }), encoding="utf-8")
+    migrated = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5})
+    return migrated["schema_version"] == 2 and migrated["params"]["extract"]["interval"] == 5
+
+
+def check_playlist_live_refusal() -> bool:
+    try:
+        import fetch_video
+    except ImportError:
+        return False
+    for info in ({"_type": "playlist"}, {"_type": "multi_video"}, {"entries": []},
+                 {"is_live": True}, {"live_status": "is_upcoming"}):
+        calls: list[bool] = []
+
+        class FakeYDL:
+            def __init__(self, options: dict) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def extract_info(self, url: str, *, download: bool):
+                calls.append(download)
+                return info
+
+        if fetch_video.main(["https://example.invalid/video"], ydl_factory=FakeYDL) != 3 or calls != [False]:
+            return False
+    return True
+
+
+def check_default_offline() -> bool:
+    fetch_tree = ast.parse((HERE / "fetch_video.py").read_text(encoding="utf-8"))
+    test_tree = ast.parse((HERE / "selftest.py").read_text(encoding="utf-8"))
+    top_level_ytdlp = any(isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+        (alias.name == "yt_dlp" or alias.name.startswith("yt_dlp.")) for alias in node.names)
+                          for node in fetch_tree.body)
+    network_branch = any(isinstance(node, ast.If) and isinstance(node.test, ast.Attribute)
+                         and node.test.attr == "network" and any(
+                             isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                             and child.func.id == "check_network_fetch" for child in ast.walk(node))
+                         for node in ast.walk(test_tree))
+    return "yt_dlp" not in sys.modules and not top_level_ytdlp and network_branch
+
+
+def check_network_fetch(url: str, folder: Path) -> bool:
+    fetch = subprocess.run([sys.executable, str(HERE / "fetch_video.py"), url, "--dest", str(folder)],
+                           check=False)
+    if fetch.returncode != 0:
+        return False
+    manifests = list(folder.glob("*.analysis/manifest.json"))
+    videos = [path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in
+              {".mp4", ".mkv", ".webm", ".mov"}]
+    if not manifests or not videos:
+        return False
+    return extract(videos[-1], "--skip-transcript") == 0
+
+
+def check_documentation_contract() -> bool:
+    skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
+    readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
+    return all("fetch_video.py" in text and "setup_tools.py --check" in text
+               and "selftest.py --network" in text and "frames.json" in text
+               for text in (skill, readme))
+
+
 def make_offset_video(target: Path) -> None:
     from tools import resolve_ffmpeg
     ffmpeg = resolve_ffmpeg().path
@@ -147,6 +282,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--work-dir", type=Path)
+    parser.add_argument("--network", metavar="URL", help="also fetch and extract one real URL")
     args = parser.parse_args()
     folder = args.work_dir or Path(tempfile.mkdtemp(prefix="video-analysis-selftest-"))
     folder.mkdir(parents=True, exist_ok=True)
@@ -189,7 +325,14 @@ def main() -> int:
         checks["JS runtime prefers deno then node"] = check_js_runtime()
         checks["setup installs only missing dependencies"] = check_setup_plan()
         checks["metadata normalization fixture"] = check_metadata_fixture()
+        checks["fetch manifest accepted by extract"] = check_fetch_manifest()
+        checks["v0.1 manifest remains compatible"] = check_legacy_manifest()
+        checks["playlist and live are refused before download"] = check_playlist_live_refusal()
+        checks["default selftest is offline"] = check_default_offline()
+        checks["documentation contract current"] = check_documentation_contract()
         checks["offset container PTS preserved"] = check_offset_pts(folder)
+        if args.network:
+            checks["network fetch and extract"] = check_network_fetch(args.network, folder / "network")
     except Exception as error:  # report failures as named checks, not a traceback
         print(f"FAIL  new checks raised {type(error).__name__}: {error}")
         checks["new checks completed"] = False

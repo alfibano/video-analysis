@@ -217,14 +217,31 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         if any(work.iterdir()):
             raise FileExistsError(f"{work} is not empty and has no manifest: refusing to mix outputs.\n"
                                   "Send that folder to the Recycle Bin (trash skill), then re-run.")
-        return {"source": identity, "params": params, "stages": {}}
+        return {"schema_version": 2, "source": identity,
+                "params": {"fetch": {}, "extract": params}, "stages": {}}
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("source") != identity or manifest.get("params") != params:
+    if manifest.get("schema_version") == 2:
+        recorded_params = manifest.get("params", {})
+        extract_params = recorded_params.get("extract", {})
+        fetch_params = recorded_params.get("fetch", {})
+        fetch_only_unconfigured = not extract_params
+    else:
+        # v0.1 stored extraction settings directly in params.
+        fetch_params = {}
+        extract_params = manifest.get("params", {})
+        fetch_only_unconfigured = False
+        manifest = {"schema_version": 2, "source": manifest.get("source"),
+                    "params": {"fetch": fetch_params, "extract": extract_params},
+                    "stages": manifest.get("stages", {})}
+    if fetch_only_unconfigured:
+        extract_params = params
+    if manifest.get("source") != identity or extract_params != params:
         raise FileExistsError(
             f"{work} was made from another video or other parameters.\n"
-            f"  recorded: {manifest.get('source')} {manifest.get('params')}\n"
+            f"  recorded: {manifest.get('source')} {extract_params}\n"
             f"  now:      {identity} {params}\n"
             "Send that folder to the Recycle Bin (trash skill), then re-run.")
+    manifest["params"] = {"fetch": fetch_params, "extract": extract_params}
     return manifest
 
 
