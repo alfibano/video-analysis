@@ -18,6 +18,11 @@ The owner deletes it when the work on that video is done, to reclaim disk space.
 (Recycle Bin, never `rm`). Your *written analysis* (the deliverable) belongs where the project wants
 it, not inside the `.analysis` folder, so that trashing the folder loses nothing of value.
 
+Temporary and self-test work goes in the installed skill's `video-analysis/_temp` folder. The whole
+`_temp` folder can be sent to the Recycle Bin when no run is in progress; scripts never delete it.
+Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
+Analysis outputs remain in `<video>.analysis/` next to the video.
+
 ## 1. Tools (once per machine)
 
 ```bash

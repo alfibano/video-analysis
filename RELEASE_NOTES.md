@@ -9,6 +9,8 @@
   `frames.json` for timestamp labels.
 - `setup_tools.py --check` reports tool paths and origins; self-test adds offline hand-off checks and
   optional `--network URL` fetch plus extraction.
+- Temporary and self-test work uses the installed skill's `_temp` folder, with `VIDEO_ANALYSIS_TEMP_DIR`
+  available to redirect it for sandboxed or CI runs.
 
 ### Fixed
 - Subtitle downloads run after the video as a best-effort pass. Missing or rate-limited subtitles are

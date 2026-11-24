@@ -27,6 +27,7 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |
 | v0.1 manifest remains compatible | older flat manifests are migrated to v2 in memory |
 | playlist and live are refused before download | a fake yt-dlp confirms preflight happens before downloading |
+| temporary folders live in the app _temp folder | test runs use the skill's `_temp` folder or `VIDEO_ANALYSIS_TEMP_DIR`, and scripts centralize temporary folder creation |
 | default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
 | documentation contract current | usage docs mention fetch, tool checks, network self-test and `frames.json` |
 | *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
@@ -53,5 +54,7 @@ Network mode writes its download under `<work-dir>/network` (or the fresh test f
 
 ## Cleanup
 
-Test files go to a fresh folder in the system temp directory (or `--work-dir`), printed at the end.
-The script never deletes anything: send that folder to the Recycle Bin when you no longer need it.
+Test files go to a fresh folder in the installed skill's `video-analysis/_temp` folder (or `--work-dir`),
+printed at the end. The whole `_temp` folder can be sent to the Recycle Bin when no run is in progress;
+the script never deletes anything. Analysis outputs remain in `<video>.analysis/` next to the video.
+Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.

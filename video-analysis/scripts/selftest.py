@@ -9,7 +9,6 @@ import json
 import re
 import subprocess
 import sys
-import tempfile
 import wave
 from pathlib import Path
 from typing import Callable
@@ -98,13 +97,45 @@ def check_metadata_fixture() -> bool:
             and empty.get("upload_date") is None and empty.get("chapters") == [] and empty.get("tags") == [])
 
 
+def check_app_temp_folder() -> bool:
+    try:
+        from tools import TEMP_DIR_ENV, app_temp_dir, app_temp_path, make_temp_folder
+    except ImportError:
+        return False
+    skill_temp_path = HERE.parent / "_temp"
+    override_path = Path(__file__).resolve().parents[1] / "temp-override-check"
+    if app_temp_path({}) != skill_temp_path or app_temp_path({TEMP_DIR_ENV: str(override_path)}) != override_path:
+        return False
+    try:
+        app_temp_path({TEMP_DIR_ENV: "relative-temp-override"})
+    except ValueError:
+        pass
+    else:
+        return False
+    temp_folder = make_temp_folder("video-analysis-temp-check-")
+    return temp_folder.parent == app_temp_dir()
+
+
+def check_temp_calls_are_centralized() -> bool:
+    occurrences = {
+        source.name
+        for source in HERE.glob("*.py")
+        if any(call in source.read_text(encoding="utf-8")
+               for call in ("tempfile." + "mkdtemp(", "tempfile." + "gettempdir("))
+    }
+    tools_source = (HERE / "tools.py").read_text(encoding="utf-8")
+    helper_call = "tempfile." + "mkdtemp(" + "prefix=prefix, dir=app_temp_dir())"
+    return occurrences == {"tools.py"} and helper_call in tools_source
+
+
 def check_fetch_manifest() -> bool:
     try:
         import fetch_video
         from extract_video import load_manifest
     except ImportError:
         return False
-    dest = Path(tempfile.mkdtemp(prefix="video-analysis-manifest-"))
+    from tools import make_temp_folder
+    dest = make_temp_folder("video-analysis-manifest-")
     info = {"_type": "video", "id": "test-id", "title": "Sample video", "language": "fr",
             "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": []}
     calls: list[bool] = []
@@ -161,7 +192,8 @@ def check_subtitle_failure_is_best_effort() -> bool:
         import fetch_video
     except ImportError:
         return False
-    dest = Path(tempfile.mkdtemp(prefix="video-analysis-subtitle-failure-"))
+    from tools import make_temp_folder
+    dest = make_temp_folder("video-analysis-subtitle-failure-")
     option_sets: list[dict] = []
     info = {"_type": "video", "id": "short-id", "title": "Short", "language": "en",
             "webpage_url": "https://example.invalid/short"}
@@ -214,7 +246,8 @@ def check_legacy_manifest() -> bool:
         from extract_video import load_manifest
     except ImportError:
         return False
-    folder = Path(tempfile.mkdtemp(prefix="video-analysis-legacy-"))
+    from tools import make_temp_folder
+    folder = make_temp_folder("video-analysis-legacy-")
     (folder / "manifest.json").write_text(json.dumps({
         "source": {"path": "video.mp4"}, "params": {"interval": 5}, "stages": {},
     }), encoding="utf-8")
@@ -408,11 +441,12 @@ def main() -> int:
     parser.add_argument("--full", action="store_true",
                         help="also run Whisper transcription and use its cached or downloaded model")
     parser.add_argument("--work-dir", type=Path,
-                        help="folder for synthetic video and analysis (default: a fresh system temp folder)")
+                        help="folder for synthetic video and analysis (default: a fresh folder in video-analysis/_temp)")
     parser.add_argument("--network", metavar="URL",
                         help="also fetch and extract one real online video URL")
     args = parser.parse_args()
-    folder = args.work_dir or Path(tempfile.mkdtemp(prefix="video-analysis-selftest-"))
+    from tools import make_temp_folder
+    folder = args.work_dir or make_temp_folder("video-analysis-selftest-")
     folder.mkdir(parents=True, exist_ok=True)
     video = folder / "synthetic video é.mp4"
     make_video(video)
@@ -465,6 +499,9 @@ def main() -> int:
         checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
         checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
         checks["metadata normalization fixture"] = run_check("metadata normalization fixture", check_metadata_fixture)
+        checks["temporary folders live in the app _temp folder"] = run_check(
+            "temporary folders live in the app _temp folder",
+            lambda: check_app_temp_folder() and check_temp_calls_are_centralized())
         checks["fetch manifest accepted by extract"] = run_check("fetch manifest accepted by extract", check_fetch_manifest)
         checks["subtitle failure does not fail the fetch"] = run_check(
             "subtitle failure does not fail the fetch", check_subtitle_failure_is_best_effort)
@@ -485,7 +522,7 @@ def main() -> int:
         if not passed and CHECK_OUTPUTS.get(name):
             for line in CHECK_OUTPUTS[name].rstrip().splitlines():
                 print(f"    {line}")
-    print(f"test folder (send to the Recycle Bin when done): {folder}")
+    print(f"test folder (send to the Recycle Bin when done; _temp holds all test runs): {folder}")
     return 0 if all(checks.values()) else 1
 
 

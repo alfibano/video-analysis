@@ -3,8 +3,36 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
+
+
+TEMP_DIR_ENV = "VIDEO_ANALYSIS_TEMP_DIR"
+
+
+def app_temp_path(env: Mapping[str, str] | None = None) -> Path:
+    environ = os.environ if env is None else env
+    override = environ.get(TEMP_DIR_ENV, "").strip()
+    if override:
+        path = Path(override)
+        if not path.is_absolute():
+            raise ValueError(f"{TEMP_DIR_ENV} must be an absolute path")
+        return path
+    return Path(__file__).resolve().parent.parent / "_temp"
+
+
+def app_temp_dir() -> Path:
+    """Create the app-local temp root so obsolete work has one place to clean; scripts never delete it."""
+    path = app_temp_path()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def make_temp_folder(prefix: str) -> Path:
+    """Create and return a fresh temporary folder inside the app temp directory."""
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=app_temp_dir()))
 
 
 @dataclass(frozen=True, slots=True)
