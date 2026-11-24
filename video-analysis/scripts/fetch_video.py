@@ -42,8 +42,6 @@ def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
         "restrictfilenames": True,
         "outtmpl": str(dest / "%(title).120B_%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
-        "writesubtitles": True,
-        "writeautomaticsub": True,
         "subtitleslangs": languages,
         "quiet": True,
         "no_warnings": True,
@@ -61,6 +59,34 @@ def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
     if js_runtime is not None:
         options["js_runtimes"] = {Path(js_runtime.path).stem: {"path": js_runtime.path}}
     return options
+
+
+def build_subtitle_options(dest: Path, languages: list[str]) -> dict[str, Any]:
+    options = build_ydl_options(dest, sub_langs=languages)
+    options.update({"skip_download": True, "writesubtitles": True,
+                    "writeautomaticsub": True, "ignoreerrors": True})
+    return options
+
+
+def subtitle_result(info: dict[str, Any] | None, requested: list[str], dest: Path,
+                   video: Path) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    info = info or {}
+    subtitles = info.get("requested_subtitles") or {}
+    saved = []
+    for language, subtitle in subtitles.items():
+        source = subtitle.get("filepath") if isinstance(subtitle, dict) else None
+        if source and Path(source).is_file():
+            saved.append(language)
+    # yt-dlp versions differ in whether subtitle paths are returned. Match sidecars
+    # emitted beside the video by their language suffix as a fallback.
+    for path in dest.glob(f"{video.stem}*.??*"):
+        if path.suffix.lower() not in SUBTITLE_SUFFIXES:
+            continue
+        for language in requested:
+            if f".{language}." in path.name and language not in saved:
+                saved.append(language)
+    missing = [language for language in requested if language not in saved]
+    return info, {"requested": requested, "saved": saved, "missing": missing}
 
 
 def _youtube_dl_factory() -> Callable[[dict[str, Any]], Any]:
@@ -86,7 +112,8 @@ def _bounded_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dict[str, Any]) -> Path:
+def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dict[str, Any],
+                  subtitles: dict[str, list[str]]) -> Path:
     work = video.parent / f"{video.stem}.analysis"
     work.mkdir(exist_ok=True)
     sanitized = ydl.sanitize_info(info)
@@ -95,8 +122,8 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     (work / "sponsorblock.json").write_text(
         _bounded_json(info.get("sponsorblock_chapters") or []), encoding="utf-8")
 
-    subtitles = info.get("requested_subtitles") or {}
-    for subtitle in subtitles.values():
+    requested_subtitles = info.get("requested_subtitles") or {}
+    for subtitle in requested_subtitles.values():
         source = subtitle.get("filepath") if isinstance(subtitle, dict) else None
         if source:
             source_path = Path(source)
@@ -113,7 +140,7 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     manifest = {"schema_version": 2, "source": identity,
                 "params": {"fetch": fetch_params, "extract": {}},
-                "stages": {"fetch": {"status": "done"}}}
+                "stages": {"fetch": {"status": "done", "subtitles": subtitles}}}
     (work / "manifest.json").write_text(_bounded_json(manifest), encoding="utf-8")
     return work
 
@@ -151,8 +178,23 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         with factory(options) as ydl:
             info = download_video(args.url, ydl)
             video = _video_path(info, ydl)
-            fetch_params = {"url": args.url, "sub_langs": options["subtitleslangs"]}
-            work = write_context(video, info, ydl, fetch_params)
+            context_ydl = ydl
+        languages = options["subtitleslangs"]
+        subtitle_info = {}
+        subtitle_error = None
+        try:
+            with factory(build_subtitle_options(args.dest.resolve(), languages)) as ydl:
+                subtitle_info = download_video(args.url, ydl)
+        except Exception as error:
+            subtitle_error = " ".join(str(error).split())[:160] or type(error).__name__
+        subtitle_info, subtitle_status = subtitle_result(
+            subtitle_info, languages, args.dest.resolve(), video)
+        info["requested_subtitles"] = subtitle_info.get("requested_subtitles") or {}
+        fetch_params = {"url": args.url, "sub_langs": languages}
+        work = write_context(video, info, context_ydl, fetch_params, subtitle_status)
+        if subtitle_status["missing"]:
+            reason = subtitle_error or "no matching subtitle files were produced"
+            print(f"WARNING: subtitles unavailable for {', '.join(subtitle_status['missing'])} ({reason})")
         print(f"FETCHED: {video}")
         print(f"WORK FOLDER: {work}")
         return 0

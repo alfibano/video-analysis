@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import io
 import json
 import re
 import subprocess
@@ -10,10 +12,14 @@ import sys
 import tempfile
 import wave
 from pathlib import Path
+from typing import Callable
 from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
+CHILD_OUTPUT: list[str] = []
+LAST_EXTRACT_OUTPUT = ""
+CHECK_OUTPUTS: dict[str, str] = {}
 
 
 def check_tool_resolution() -> bool:
@@ -145,9 +151,62 @@ def check_fetch_manifest() -> bool:
                                 and "remove" not in pp for pp in download_pp)
                         and "sponsorblock_mark" not in option_sets[1]
                         and "sponsorblock_remove" not in option_sets[1])
-    return (calls == [False, True] and video.is_file() and (folder / "metadata.json").is_file()
+    return (calls == [False, True, True] and video.is_file() and (folder / "metadata.json").is_file()
             and manifest["params"]["fetch"]["url"].startswith("https://")
             and "fetch" in accepted["stages"] and has_sponsorblock)
+
+
+def check_subtitle_failure_is_best_effort() -> bool:
+    try:
+        import fetch_video
+    except ImportError:
+        return False
+    dest = Path(tempfile.mkdtemp(prefix="video-analysis-subtitle-failure-"))
+    option_sets: list[dict] = []
+    info = {"_type": "video", "id": "short-id", "title": "Short", "language": "en",
+            "webpage_url": "https://example.invalid/short"}
+    video = dest / "Short_short-id.mp4"
+
+    class FakeYDL:
+        def __init__(self, options: dict) -> None:
+            self.options = options
+            option_sets.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def extract_info(self, url: str, *, download: bool):
+            if not download:
+                return info
+            if self.options.get("skip_download"):
+                raise RuntimeError("HTTP Error 429: Too Many Requests")
+            video.write_bytes(b"video")
+            info["requested_downloads"] = [{"filepath": str(video)}]
+            return info
+
+        def sanitize_info(self, value: dict) -> dict:
+            return value
+
+        def prepare_filename(self, value: dict) -> str:
+            return str(video)
+
+    from contextlib import redirect_stdout
+    output = io.StringIO()
+    with redirect_stdout(output):
+        result = fetch_video.main(["https://example.invalid/short", "--dest", str(dest)],
+                                  ydl_factory=FakeYDL)
+    work = dest / f"{video.stem}.analysis"
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    subtitles = manifest["stages"]["fetch"]["subtitles"]
+    return (result == 0 and video.is_file() and (work / "metadata.json").is_file()
+            and subtitles == {"requested": ["en"], "saved": [], "missing": ["en"]}
+            and len(option_sets) == 3 and "writesubtitles" not in option_sets[1]
+            and "writeautomaticsub" not in option_sets[1] and "ignoreerrors" not in option_sets[1]
+            and option_sets[2].get("ignoreerrors") is True
+            and output.getvalue().startswith("WARNING: subtitles unavailable for en (HTTP Error 429"))
 
 
 def check_legacy_manifest() -> bool:
@@ -207,7 +266,8 @@ def check_default_offline() -> bool:
 
 def check_network_fetch(url: str, folder: Path) -> bool:
     fetch = subprocess.run([sys.executable, str(HERE / "fetch_video.py"), url, "--dest", str(folder)],
-                           check=False)
+                           check=False, capture_output=True, text=True)
+    CHILD_OUTPUT.append(fetch.stdout + fetch.stderr)
     if fetch.returncode != 0:
         return False
     manifests = list(folder.glob("*.analysis/manifest.json"))
@@ -309,8 +369,27 @@ def make_video(target: Path) -> None:
 
 
 def extract(video: Path, *extra: str) -> int:
-    return subprocess.run([sys.executable, str(HERE / "extract_video.py"), str(video), *extra],
-                          check=False).returncode
+    global LAST_EXTRACT_OUTPUT
+    result = subprocess.run([sys.executable, str(HERE / "extract_video.py"), str(video), *extra],
+                            check=False, capture_output=True, text=True)
+    LAST_EXTRACT_OUTPUT = result.stdout + result.stderr
+    CHILD_OUTPUT.append(LAST_EXTRACT_OUTPUT)
+    return result.returncode
+
+
+def run_check(name: str, check: Callable[[], bool]) -> bool:
+    CHILD_OUTPUT.clear()
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            passed = bool(check())
+    except Exception as error:
+        passed = False
+        stderr.write(f"{type(error).__name__}: {error}\n")
+    details = stdout.getvalue() + stderr.getvalue() + "".join(CHILD_OUTPUT)
+    if not passed and details.strip():
+        CHECK_OUTPUTS[name] = details
+    return passed
 
 
 def main() -> int:
@@ -341,15 +420,19 @@ def main() -> int:
     skip = [] if args.full else ["--skip-transcript"]
 
     first = extract(video, *skip, "--at", "00:00:12.250")
+    first_output = LAST_EXTRACT_OUTPUT
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     frames_mtime = (work / "frames" / "f00001.jpg").stat().st_mtime
     second = extract(video, *skip)
+    second_output = LAST_EXTRACT_OUTPUT
     conflict = extract(video, *skip, "--interval", "3")
+    conflict_output = LAST_EXTRACT_OUTPUT
     orphan = folder / "orphan.mp4"
     orphan.write_bytes(video.read_bytes())
     (folder / "orphan.analysis").mkdir()
     (folder / "orphan.analysis" / "stray.txt").write_text("not ours", encoding="utf-8")
     orphan_refused = extract(orphan, *skip)
+    orphan_output = LAST_EXTRACT_OUTPUT
     checks = {
         "first run exit 0": first == 0,
         "folder created next to the video": work.parent == video.parent,
@@ -363,31 +446,45 @@ def main() -> int:
         "changed parameters refused with exit 3": conflict == 3,
         "non-empty folder without manifest refused with exit 3": orphan_refused == 3,
     }
+    for name, passed, output in (
+        ("first run exit 0", first == 0, first_output),
+        ("rerun exit 0 and frames untouched", second == 0, second_output),
+        ("changed parameters refused with exit 3", conflict == 3, conflict_output),
+        ("non-empty folder without manifest refused with exit 3", orphan_refused == 3, orphan_output),
+    ):
+        if not passed and output.strip():
+            CHECK_OUTPUTS[name] = output
     if args.full:
         with wave.open(str(work / "audio.wav"), "rb") as stream:
             checks["wav is 16 kHz mono PCM16"] = (stream.getframerate(), stream.getnchannels(),
                                                   stream.getsampwidth()) == (16_000, 1, 2)
         checks["transcript files written"] = (work / "transcript.json").exists() and (work / "transcript.txt").exists()
     try:
-        checks["ffmpeg resolution precedence"] = check_tool_resolution()
-        checks["yt-dlp resolved as module when CLI absent"] = check_ytdlp_module_resolution()
-        checks["JS runtime prefers deno then node"] = check_js_runtime()
-        checks["setup installs only missing dependencies"] = check_setup_plan()
-        checks["metadata normalization fixture"] = check_metadata_fixture()
-        checks["fetch manifest accepted by extract"] = check_fetch_manifest()
-        checks["v0.1 manifest remains compatible"] = check_legacy_manifest()
-        checks["playlist and live are refused before download"] = check_playlist_live_refusal()
-        checks["default selftest is offline"] = check_default_offline()
-        checks["documentation contract current"] = check_documentation_contract()
-        checks["every script help describes itself"] = check_script_help_contract()
-        checks["offset container PTS preserved"] = check_offset_pts(folder)
+        checks["ffmpeg resolution precedence"] = run_check("ffmpeg resolution precedence", check_tool_resolution)
+        checks["yt-dlp resolved as module when CLI absent"] = run_check("yt-dlp resolved as module when CLI absent", check_ytdlp_module_resolution)
+        checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
+        checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
+        checks["metadata normalization fixture"] = run_check("metadata normalization fixture", check_metadata_fixture)
+        checks["fetch manifest accepted by extract"] = run_check("fetch manifest accepted by extract", check_fetch_manifest)
+        checks["subtitle failure does not fail the fetch"] = run_check(
+            "subtitle failure does not fail the fetch", check_subtitle_failure_is_best_effort)
+        checks["v0.1 manifest remains compatible"] = run_check("v0.1 manifest remains compatible", check_legacy_manifest)
+        checks["playlist and live are refused before download"] = run_check("playlist and live are refused before download", check_playlist_live_refusal)
+        checks["default selftest is offline"] = run_check("default selftest is offline", check_default_offline)
+        checks["documentation contract current"] = run_check("documentation contract current", check_documentation_contract)
+        checks["every script help describes itself"] = run_check("every script help describes itself", check_script_help_contract)
+        checks["offset container PTS preserved"] = run_check("offset container PTS preserved", lambda: check_offset_pts(folder))
         if args.network:
-            checks["network fetch and extract"] = check_network_fetch(args.network, folder / "network")
+            checks["network fetch and extract"] = run_check(
+                "network fetch and extract", lambda: check_network_fetch(args.network, folder / "network"))
     except Exception as error:  # report failures as named checks, not a traceback
         print(f"FAIL  new checks raised {type(error).__name__}: {error}")
         checks["new checks completed"] = False
     for name, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}  {name}")
+        if not passed and CHECK_OUTPUTS.get(name):
+            for line in CHECK_OUTPUTS[name].rstrip().splitlines():
+                print(f"    {line}")
     print(f"test folder (send to the Recycle Bin when done): {folder}")
     return 0 if all(checks.values()) else 1
 

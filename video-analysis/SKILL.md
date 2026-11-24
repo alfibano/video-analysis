@@ -31,6 +31,11 @@ system ffmpeg is found; then caches the Whisper `small` model. Tool resolution: 
 JavaScript runtime (Deno, else Node). `--check` prints each tool with its origin. Exit 0 = `READY`.
 Network is used only by setup and by `fetch_video.py`; local analysis is offline.
 
+Whisper model: Whisper is OpenAI's open speech-recognition AI, run locally via `faster-whisper`; the
+*model* is its trained-knowledge file, downloaded once into the Hugging Face cache — afterwards the
+audio never leaves the PC. Sizes `tiny`/`base`/`small`/`medium`: bigger = more accurate but slower;
+default `small` (best CPU trade-off), `medium` ≈3x slower (`--model medium`).
+
 Self-test (synthetic video and offline contract checks, `--full` adds Whisper):
 `python ~/.claude/skills/video-analysis/scripts/selftest.py`
 
@@ -48,8 +53,10 @@ python ~/.claude/skills/video-analysis/scripts/fetch_video.py "<URL>" --dest "<f
 ```
 
 By default subtitles for the video's language and English are saved when available. Choose other
-languages with `--sub-langs fr en`. Fetch writes `metadata.json`, sanitized `raw_info.json`,
-subtitle files, `sponsorblock.json`, and a v2 `manifest.json` into `<video>.analysis/`.
+languages with `--sub-langs fr en`. The video downloads first; subtitles download in a separate
+best-effort pass, so subtitle errors (including rate limits) do not fail the fetch. Missing languages
+are reported in a warning and recorded in the fetch manifest. Fetch writes `metadata.json`, sanitized
+`raw_info.json`, available subtitle files, `sponsorblock.json`, and a v2 `manifest.json` into `<video>.analysis/`.
 
 For a local video, or after fetching a URL, extract frames and transcript:
 

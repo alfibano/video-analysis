@@ -8,6 +8,13 @@ by timestamp — keeping what is on screen, what is said, and what is inferred a
 Local analysis works offline after a one-time model download. URL fetching is an explicit network
 step. No system ffmpeg or admin rights: tested on Windows 11 with Python 3.12.
 
+**About the Whisper model.** The transcript is produced by Whisper, OpenAI's open speech-recognition
+AI, run locally through `faster-whisper`. Its *model* is the trained-knowledge file the program needs:
+`setup_tools.py` downloads it once into the Hugging Face cache, after which transcription is offline
+and the audio never leaves your PC. Sizes `tiny`, `base`, `small`, `medium`: bigger is more accurate
+but slower. `small` is the default (best trade-off on a CPU); `medium` is about 3x slower. The
+self-test skips transcription unless you pass `--full`.
+
 ## Install
 
 ```bash

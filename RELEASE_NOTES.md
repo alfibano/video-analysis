@@ -10,6 +10,10 @@
 - `setup_tools.py --check` reports tool paths and origins; self-test adds offline hand-off checks and
   optional `--network URL` fetch plus extraction.
 
+### Fixed
+- Subtitle downloads run after the video as a best-effort pass. Missing or rate-limited subtitles are
+  warned about and recorded in the fetch manifest without failing a successful video download.
+
 ### Documentation
 - `docs/selftest.md`: what the self-test checks, when to run it, usage, cleanup; presented in the
   README. The skill and README document URL fetch, tool setup, subtitles, and exact frame timestamps.

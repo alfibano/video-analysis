@@ -24,6 +24,7 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | changed parameters refused with exit 3 | a guard refuses to mix outputs made with other settings |
 | non-empty folder without manifest refused with exit 3 | a guard refuses to adopt a folder it did not create |
 | fetch manifest accepted by extract | v2 hand-off retains fetch data while extract records its own settings |
+| subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |
 | v0.1 manifest remains compatible | older flat manifests are migrated to v2 in memory |
 | playlist and live are refused before download | a fake yt-dlp confirms preflight happens before downloading |
 | default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
