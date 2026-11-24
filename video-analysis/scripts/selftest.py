@@ -425,6 +425,100 @@ def run_check(name: str, check: Callable[[], bool]) -> bool:
     return passed
 
 
+def check_bundle_chapters() -> bool:
+    from bundle import discover_chapters
+    chapters = discover_chapters(
+        [{"start_time": 0, "end_time":":bad", "title":"bad"},
+         {"start_time": 20, "end_time": 80, "title":"second"},
+         {"start_time": 0, "end_time": 25, "title":"first"}],
+        100, transcript_segments=[])
+    fallback = discover_chapters([], 650, transcript_segments=[
+        {"start": 290, "end": 292}, {"start": 588, "end": 590}])
+    two_windows = discover_chapters([], 500)
+    pause_windows = discover_chapters([], 610, transcript_segments=[
+        {"start": 270, "end": 275}, {"start": 285, "end": 290}])
+    short = discover_chapters([], 20)
+    return ([(item.start, item.end, item.title) for item in chapters] ==
+            [(0.0, 25.0, "first"), (25.0, 80.0, "second")] and
+            all(item.source == "metadata" for item in chapters) and
+            fallback[0].source == "fallback" and fallback[-1].end == 650 and
+            all(item.end - item.start <= 600 for item in fallback) and
+            [(item.start, item.end) for item in two_windows] == [(0, 300), (300, 500)] and
+            pause_windows[0].end == 280 and pause_windows[1].start == 280 and
+            len(short) == 1 and (short[0].start, short[0].end) == (0, 20))
+
+
+def check_bundle_subtitle_priority() -> bool:
+    from bundle import dedupe_rolling_cues, parse_vtt, select_speech_source
+    fixture_dir = HERE / "fixtures"
+    raw = json.loads((fixture_dir / "raw_info_subtitles.json").read_text(encoding="utf-8"))
+    chosen = select_speech_source("fr", raw, ["video.fr.vtt"], transcript_language="en", video_stem="video")
+    rolling = (fixture_dir / "youtube_auto.fr.vtt").read_text(encoding="utf-8")
+    cues = dedupe_rolling_cues(parse_vtt(rolling, rolling=True))
+    expected = ("Bonjour \u00e0 tous, aujourd'hui nous allons parler des \u00e9quations. "
+                "C'est une le\u00e7on importante. Prenez votre cahier et notez")
+    return (chosen.source == "manual" and chosen.language == "fr" and
+            " ".join(cue.text for cue in cues) == expected)
+
+
+def check_bundle_subtitle_parsers() -> bool:
+    from bundle import parse_srt, parse_vtt
+    fixture_dir = HERE / "fixtures"
+    vtt = parse_vtt((fixture_dir / "manual.fr.vtt").read_text(encoding="utf-8"))
+    srt = parse_srt((fixture_dir / "sample.en.srt").read_text(encoding="utf-8"))
+    return (len(vtt) == 2 and vtt[0].text == "Bonjour à tous" and vtt[0].start == 0 and
+            len(srt) == 2 and srt[1].text == "Second line" and srt[1].end == 4)
+
+
+def check_bundle_frame_pts() -> bool:
+    from bundle import Chapter, align_frames
+    chapters = [Chapter(0, 5, "One", "test"), Chapter(5, 10, "Two", "test")]
+    frames = align_frames({"f00001.jpg": 1.5, "f00002.jpg": 7.5}, chapters, {"f00002.jpg"})
+    return (frames[0].chapter_index == 0 and frames[0].pts == 1.5 and
+            frames[1].chapter_index == 1 and frames[1].is_key)
+
+
+def check_bundle_sponsors() -> bool:
+    from bundle import Chapter, FrameAssignment, SpeechSegment, build_bundle, parse_sponsors
+    sponsors = parse_sponsors([{"segment": [0, 3], "category":"sponsor"},
+                               {"start_time": 7, "end_time": 9, "title": "other"}])
+    bundle = build_bundle({"title":"Test", "duration":10}, [Chapter(0, 10, "Chapter 1", "test")],
+                          [SpeechSegment(1, 4, "ad"), SpeechSegment(5, 7, "content")],
+                          [FrameAssignment("f.jpg", 2, 0, True)], sponsors)
+    chapter = bundle["chapters"][0]
+    return (chapter["speech_text"] == "content" and
+            chapter["speech_segments"][0]["is_sponsor"] and
+            chapter["frames"][0]["is_sponsor"] and
+            [(item.start, item.end) for item in sponsors] == [(0, 3), (7, 9)] and
+            chapter["sponsor_overlap"][0]["overlap_s"] == 3)
+
+
+def check_ocr_key_frames() -> bool:
+    from ocr import ocr_key_frames
+    seen = []
+    class FakeOutput:
+        txts = ["Résumé", "low score"]
+        scores = [0.95, 0.2]
+    class FakeEngine:
+        def __call__(self, frame):
+            seen.append(frame)
+            return FakeOutput()
+    results = ocr_key_frames([("a.jpg", Path("a.jpg"))], lambda: FakeEngine())
+    class EmptyOutput:
+        txts = None
+        scores = None
+    empty = ocr_key_frames([("c.jpg", Path("c.jpg"))], lambda: lambda _: EmptyOutput())
+    return seen == [Path("a.jpg")] and results == {"a.jpg": "Résumé"} and empty == {"c.jpg": ""}
+
+
+def check_ocr_is_lazy() -> bool:
+    import ast
+    tree = ast.parse((HERE / "ocr.py").read_text(encoding="utf-8"))
+    return not any((isinstance(node, ast.Import) and any(alias.name.startswith("rapidocr") for alias in node.names))
+                   or (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("rapidocr"))
+                   for node in tree.body)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -511,6 +605,14 @@ def main() -> int:
         checks["documentation contract current"] = run_check("documentation contract current", check_documentation_contract)
         checks["every script help describes itself"] = run_check("every script help describes itself", check_script_help_contract)
         checks["offset container PTS preserved"] = run_check("offset container PTS preserved", lambda: check_offset_pts(folder))
+        checks["chapter source precedence and bounds"] = run_check("chapter source precedence and bounds", check_bundle_chapters)
+        checks["subtitle priority and rolling VTT dedupe"] = run_check("subtitle priority and rolling VTT dedupe", check_bundle_subtitle_priority)
+        checks["srt and vtt normalize to segments"] = run_check("srt and vtt normalize to segments", check_bundle_subtitle_parsers)
+        checks["frames align by exact PTS"] = run_check("frames align by exact PTS", check_bundle_frame_pts)
+        checks["sponsor spans remain flagged and summary text excludes them"] = run_check(
+            "sponsor spans remain flagged and summary text excludes them", check_bundle_sponsors)
+        checks["OCR runs on key frames only"] = run_check("OCR runs on key frames only", check_ocr_key_frames)
+        checks["OCR adapter is lazy"] = run_check("OCR adapter is lazy", check_ocr_is_lazy)
         if args.network:
             checks["network fetch and extract"] = run_check(
                 "network fetch and extract", lambda: check_network_fetch(args.network, folder / "network"))
