@@ -1,0 +1,16 @@
+{
+  "id": "demo123",
+  "title": "Offline fixture video",
+  "uploader": "Example creator",
+  "channel": "Example channel",
+  "upload_date": "20240307",
+  "duration": 42.5,
+  "width": 1280,
+  "height": 720,
+  "format_id": "mp4",
+  "description": "Hand-written test fixture.",
+  "chapters": null,
+  "tags": null,
+  "webpage_url": "https://example.invalid/watch/demo123",
+  "extractor_key": "Example"
+}

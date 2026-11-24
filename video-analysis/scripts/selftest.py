@@ -17,8 +17,114 @@ import sys
 import tempfile
 import wave
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
+
+
+def check_tool_resolution() -> bool:
+    try:
+        from tools import resolve_ffmpeg
+    except ImportError:
+        return False
+    env = {"VIDEO_ANALYSIS_FFMPEG": "env-ffmpeg"}
+    which = lambda command: {"ffmpeg": "path-ffmpeg"}.get(command)
+    env_tool = resolve_ffmpeg(env=env, which=which, imageio_lookup=lambda: "bundled-ffmpeg")
+    path_tool = resolve_ffmpeg(env={}, which=which, imageio_lookup=lambda: "bundled-ffmpeg")
+    bundled_tool = resolve_ffmpeg(env={}, which=lambda _: None, imageio_lookup=lambda: "bundled-ffmpeg")
+    return ((env_tool.path, env_tool.origin) == ("env-ffmpeg", "env")
+            and (path_tool.path, path_tool.origin) == ("path-ffmpeg", "path")
+            and (bundled_tool.path, bundled_tool.origin) == ("bundled-ffmpeg", "bundled"))
+
+
+def check_js_runtime() -> bool:
+    try:
+        from tools import resolve_js_runtime
+    except ImportError:
+        return False
+    resolved = resolve_js_runtime(which=lambda command: {"deno": "deno-bin", "node": "node-bin"}.get(command))
+    fallback = resolve_js_runtime(which=lambda command: "node-bin" if command == "node" else None)
+    return (resolved is not None and resolved.path == "deno-bin"
+            and fallback is not None and fallback.path == "node-bin")
+
+
+def check_ytdlp_module_resolution() -> bool:
+    try:
+        from tools import resolve_ytdlp
+    except ImportError:
+        return False
+    fake = SimpleNamespace(__file__="fake/yt_dlp/__init__.py",
+                           version=SimpleNamespace(__version__="test-version"))
+    calls = []
+    lookup = lambda name: calls.append(name) or fake
+    module = resolve_ytdlp(env={}, which=lambda _: None, module_lookup=lookup)
+    overridden = resolve_ytdlp(env={"VIDEO_ANALYSIS_YTDLP": "custom-ytdlp"},
+                                which=lambda _: None,
+                                module_lookup=lambda _: (_ for _ in ()).throw(AssertionError()))
+    return (module is not None and module.path == fake.__file__ and module.origin == "module"
+            and module.version == "test-version" and calls == ["yt_dlp"]
+            and overridden is not None and overridden.path == "custom-ytdlp"
+            and overridden.origin == "env")
+
+
+def check_setup_plan() -> bool:
+    try:
+        import setup_tools
+        from tools import Tool
+    except ImportError:
+        return False
+    lookup = lambda module: None if module == "PIL" else (_ for _ in ()).throw(ImportError(module))
+    missing = setup_tools.missing_packages(module_lookup=lookup, ffmpeg=Tool("ffmpeg", "path"))
+    calls = []
+    fake_run = lambda command, **kwargs: calls.append(command) or SimpleNamespace(returncode=0)
+    with patch.object(setup_tools.subprocess, "run", side_effect=fake_run), \
+            patch.object(setup_tools.sys, "executable", "python-test"):
+        installed = setup_tools.install(missing)
+    return (installed and "Pillow" not in missing and "imageio-ffmpeg" not in missing
+            and "yt-dlp[default]" in missing and len(calls) == 1
+            and calls[0] == ["python-test", "-m", "pip", "install", "--user", "--quiet", *missing])
+
+
+def check_metadata_fixture() -> bool:
+    try:
+        from metadata import normalize_metadata
+    except ImportError:
+        return False
+    info = json.loads((HERE / "fixtures" / "yt_dlp_info.json").read_text(encoding="utf-8"))
+    normalized = normalize_metadata(info)
+    empty = normalize_metadata({})
+    return (normalized.get("upload_date") == "2024-03-07" and normalized.get("chapters") == []
+            and normalized.get("tags") == [] and empty.get("title") is None
+            and empty.get("upload_date") is None and empty.get("chapters") == [] and empty.get("tags") == [])
+
+
+def make_offset_video(target: Path) -> None:
+    from tools import resolve_ffmpeg
+    ffmpeg = resolve_ffmpeg().path
+    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=darkred:size=320x180:rate=10:duration=10", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-output_ts_offset", "2", str(target)], check=True)
+
+
+def check_offset_pts(folder: Path) -> bool:
+    try:
+        from extract_video import frame_time, frame_label, load_frame_stamps
+        from tools import resolve_ffmpeg
+    except ImportError:
+        return False
+    video = folder / "offset.mp4"
+    make_offset_video(video)
+    completed = extract(video, "--skip-transcript", "--interval", "2")
+    work = folder / "offset.analysis"
+    stamps = json.loads((work / "frames.json").read_text(encoding="utf-8"))
+    loaded_stamps = load_frame_stamps(work)
+    frames = sorted((work / "frames").glob("f*.jpg"))
+    labels = (work / "keyframes.txt").read_text(encoding="utf-8")
+    return (completed == 0 and frames and abs(frame_time(frames[0], 2, loaded_stamps) - 2.0) <= 0.05
+            and abs(stamps[frames[0].name] - 2.0) <= 0.05
+            and "00:00:02.000" in labels and frame_label(frames[0], 2, loaded_stamps) == "00:00:02.000"
+            and resolve_ffmpeg() is not None)
 
 
 def make_video(target: Path) -> None:
@@ -77,6 +183,16 @@ def main() -> int:
             checks["wav is 16 kHz mono PCM16"] = (stream.getframerate(), stream.getnchannels(),
                                                   stream.getsampwidth()) == (16_000, 1, 2)
         checks["transcript files written"] = (work / "transcript.json").exists() and (work / "transcript.txt").exists()
+    try:
+        checks["ffmpeg resolution precedence"] = check_tool_resolution()
+        checks["yt-dlp resolved as module when CLI absent"] = check_ytdlp_module_resolution()
+        checks["JS runtime prefers deno then node"] = check_js_runtime()
+        checks["setup installs only missing dependencies"] = check_setup_plan()
+        checks["metadata normalization fixture"] = check_metadata_fixture()
+        checks["offset container PTS preserved"] = check_offset_pts(folder)
+    except Exception as error:  # report failures as named checks, not a traceback
+        print(f"FAIL  new checks raised {type(error).__name__}: {error}")
+        checks["new checks completed"] = False
     for name, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}  {name}")
     print(f"test folder (send to the Recycle Bin when done): {folder}")

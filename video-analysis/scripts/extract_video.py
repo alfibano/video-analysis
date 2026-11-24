@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from tools import resolve_ffmpeg
 
 SHEET_COLUMNS, SHEET_ROWS, CELL_WIDTH, CELL_HEIGHT = 3, 3, 640, 360
 THUMB_SIZE = (64, 36)
@@ -44,15 +45,18 @@ class ExtractionError(Exception):
 
 
 def ffmpeg_exe() -> str:
-    import imageio_ffmpeg
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    tool = resolve_ffmpeg()
+    if tool is None:
+        raise ExtractionError("ffmpeg unavailable: install ffmpeg or imageio-ffmpeg")
+    return tool.path
 
 
-def run_ffmpeg(arguments: list[str]) -> None:
-    result = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *arguments],
+def run_ffmpeg(arguments: list[str], loglevel: str = "error") -> str:
+    result = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", loglevel, "-y", *arguments],
                             capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise ExtractionError(f"ffmpeg failed: {result.stderr.strip()[-500:]}")
+    return result.stderr
 
 
 def probe(video: Path) -> dict[str, object]:
@@ -88,19 +92,55 @@ def parse_time(text: str) -> float:
     return seconds
 
 
-def frame_time(frame: Path, interval: float) -> float:
+def load_frame_stamps(work: Path) -> dict[str, float]:
+    frames_path = work / "frames.json"
+    if not frames_path.exists():
+        return {}
+    try:
+        raw = json.loads(frames_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("expected an object")
+        return {str(name): float(value) for name, value in raw.items()}
+    except (OSError, ValueError, TypeError) as error:
+        raise ExtractionError(f"invalid frame timestamp file {frames_path}: {error}") from error
+
+
+def frame_time(frame: Path, interval: float, stamps: dict[str, float]) -> float:
+    if frame.name in stamps:
+        return stamps[frame.name]
     return (int(frame.stem[1:]) - 1) * interval
+
+
+def timestamp(seconds: float) -> str:
+    total_ms = int(round(seconds * 1000))
+    whole, millis = divmod(total_ms, 1000)
+    return f"{whole // 3600:02d}:{whole % 3600 // 60:02d}:{whole % 60:02d}.{millis:03d}"
+
+
+def frame_label(frame: Path, interval: float, stamps: dict[str, float]) -> str:
+    return timestamp(frame_time(frame, interval, stamps))
+
+
+def parse_showinfo(log: str) -> list[float]:
+    return [float(value) for value in re.findall(r"pts_time:([-+]?\d+(?:\.\d+)?)", log)]
 
 
 def extract_frames(video: Path, work: Path, interval: float) -> int:
     folder = work / "frames"
     folder.mkdir(exist_ok=True)
-    run_ffmpeg(["-i", str(video), "-vf", f"fps=1/{interval},scale=960:-2", "-q:v", "3",
-                str(folder / "f%05d.jpg")])
-    return len(list(folder.glob("f*.jpg")))
+    log = run_ffmpeg(["-copyts", "-i", str(video), "-vf",
+                      f"fps=1/{interval},scale=960:-2,showinfo", "-q:v", "3",
+                      str(folder / "f%05d.jpg")], loglevel="info")
+    frames = sorted(folder.glob("f*.jpg"))
+    stamps = parse_showinfo(log)
+    if len(frames) != len(stamps):
+        raise ExtractionError(f"ffmpeg returned {len(frames)} frames but {len(stamps)} PTS values")
+    (work / "frames.json").write_text(
+        json.dumps({frame.name: pts for frame, pts in zip(frames, stamps)}, indent=1), encoding="utf-8")
+    return len(frames)
 
 
-def build_sheets(frames: list[Path], folder: Path, interval: float) -> int:
+def build_sheets(frames: list[Path], folder: Path, interval: float, stamps: dict[str, float]) -> int:
     folder.mkdir(exist_ok=True)
     per_sheet = SHEET_COLUMNS * SHEET_ROWS
     for sheet_index, start in enumerate(range(0, len(frames), per_sheet)):
@@ -111,7 +151,7 @@ def build_sheets(frames: list[Path], folder: Path, interval: float) -> int:
             with Image.open(frame) as image:
                 sheet.paste(image.convert("RGB").resize((CELL_WIDTH, CELL_HEIGHT)), (x, y))
             draw.rectangle([x, y, x + 74, y + 18], fill="yellow")
-            draw.text((x + 3, y + 3), clock(frame_time(frame, interval)), fill="black")
+            draw.text((x + 3, y + 3), frame_label(frame, interval, stamps), fill="black")
         sheet.save(folder / f"sheet{sheet_index:02d}.jpg", quality=80)
     return -(-len(frames) // per_sheet)
 
@@ -227,11 +267,12 @@ def run(args: argparse.Namespace) -> None:
     if not args.skip_frames and not stages.get("frames"):
         count = extract_frames(video, work, args.interval)
         frames = sorted((work / "frames").glob("f*.jpg"))
-        sheets = build_sheets(frames, work / "sheets", args.interval)
+        stamps = load_frame_stamps(work)
+        sheets = build_sheets(frames, work / "sheets", args.interval, stamps)
         keys = key_frames(frames, args.dedup_threshold)
         (work / "keyframes.txt").write_text(
-            "".join(f"{clock(frame_time(k, args.interval))}  frames/{k.name}\n" for k in keys), encoding="utf-8")
-        key_sheets = build_sheets(keys, work / "keysheets", args.interval)
+            "".join(f"{frame_label(k, args.interval, stamps)}  frames/{k.name}\n" for k in keys), encoding="utf-8")
+        key_sheets = build_sheets(keys, work / "keysheets", args.interval, stamps)
         stages["frames"] = {"frames": count, "sheets": sheets, "keyframes": len(keys), "keysheets": key_sheets}
         save_manifest(work, manifest)
         print(f"frames {count} | sheets {sheets} | key frames {len(keys)}")
