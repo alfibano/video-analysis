@@ -22,7 +22,7 @@ git clone https://github.com/alfibano/video-analysis.git
 # make the skill visible to Claude Code (user level), e.g. on Windows:
 #   mklink /J "%USERPROFILE%\.claude\skills\video-analysis" "<clone>\video-analysis"
 # or copy the video-analysis/ folder into ~/.claude/skills/
-python video-analysis/scripts/setup_tools.py        # installs tools, caches the Whisper model
+python video-analysis/scripts/setup_tools.py        # installs tools and warms Whisper/OCR models
 python video-analysis/scripts/setup_tools.py --check # verifies tools and their origins
 python video-analysis/scripts/selftest.py           # offline checks on a synthetic video
 ```
@@ -49,11 +49,15 @@ For a URL, download one non-live video first, then extract it:
 ```bash
 python video-analysis/scripts/fetch_video.py "<url>" --dest "<folder>"
 python video-analysis/scripts/extract_video.py "<folder>/<video>.mp4" --language fr --interval 5
+python video-analysis/scripts/build_bundle.py "<folder>/<video>.mp4" --language fr
 ```
 
 Fetch writes normalized `metadata.json`, sanitized `raw_info.json`, available subtitle files,
 `sponsorblock.json` (segments marked, never removed), and a v2 manifest. Extract writes container
-timestamps in `frames.json` alongside the frames and transcript.
+timestamps in `frames.json` alongside the frames and transcript. Bundle writes `bundle.json` with
+chapter speech, frame PTS, SponsorBlock flags, and OCR text from key frames. Read `bundle.json` first
+when present; use `--skip-ocr` to omit OCR. Sponsor intervals stay intact, and sponsored speech is
+flagged and omitted from each chapter's summary-ready `speech_text`.
 
 Everything goes to `<video folder>/<video name>.analysis/` — frames, sheets, key frames, audio,
 transcript, manifest — so it can be deleted in one go when you are done. The scripts never delete

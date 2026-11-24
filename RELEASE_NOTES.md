@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- `build_bundle.py` creates a chapter-aligned `bundle.json` from `.analysis` files, with subtitle/Whisper speech, frame PTS, sponsor flags, and key-frame OCR. It resumes identical settings and refuses manifest conflicts.
+- `setup_tools.py` installs RapidOCR when missing, reports OCR readiness, and warms its model during normal setup; bundling supports `--skip-ocr`.
 - `fetch_video.py` downloads one video URL, refuses playlists/live streams, saves normalized and raw
   metadata, subtitles, SponsorBlock marks without removing video segments, and a v2 hand-off manifest.
 - `extract_video.py` accepts fetch manifests, migrates v0.1 manifests, and writes container PTS to
@@ -19,6 +21,7 @@
 ### Documentation
 - `docs/selftest.md`: what the self-test checks, when to run it, usage, cleanup; presented in the
   README. The skill and README document URL fetch, tool setup, subtitles, and exact frame timestamps.
+- The skill and README document the fetch → extract → bundle workflow and bundle-first reading.
 
 ## v0.1.0 — 2026-11-14 — first release
 
@@ -67,29 +70,22 @@ overclaiming.
 
 ---
 
-## Roadmap — improvement axes (not started)
+## Roadmap — improvement axes
 
 Gathered on 2026-11-14 from a survey of existing tools (unverified: found by web search, code not
 read). Ordered by expected value.
 
-1. **Alignment file screen ↔ speech** — one `segments.md`: for each key frame, its time, its image
-   path and the transcript spoken until the next key frame. Biggest gain: the agent reads one
-   document instead of cross-referencing sheets and transcript (fewer errors, fewer tokens).
-   Seen in: slidegeist, slidoc, talkthrough-mcp.
-2. **OCR of on-screen text** — titles, chart labels, figures become searchable text, often too
-   small on contact sheets. Must install by pip only (no system Tesseract here): evaluate RapidOCR.
-   Seen in: slidegeist (Tesseract), talkthrough-mcp, media-context-mcp, OcularAudio-MCP.
-3. **Scene-aware sampling** — denser frames when the screen changes, sparser when static, with a
+1. **Scene-aware sampling** — denser frames when the screen changes, sparser when static, with a
    frame cap; alongside the fixed interval. Seen in: claude-video (cap 100), claude-real-video.
-4. **Detail levels** — transcript-only / key frames / full, to spend only what the question needs.
+2. **Detail levels** — transcript-only / key frames / full, to spend only what the question needs.
    Seen in: claude-video.
-5. **SRT output** and word-level timestamps. Seen in: vidwise.
-6. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
+3. **SRT output** and word-level timestamps. Seen in: vidwise.
+4. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
    Seen in: talkthrough-mcp, media-context-mcp, VideoContext MCP.
-7. **Multilingual documentation** — README, docs and release notes in English (default), French
+5. **Multilingual documentation** — README, docs and release notes in English (default), French
    and Spanish at least, with a language switcher at the top of each page. Owner request,
    2026-11-14.
-8. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
+6. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
    the agent already describes images. Seen in: Framesleuth.
 
 Survey sources: [claude-video](https://github.com/bradautomates/claude-video) ·

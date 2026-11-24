@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.metadata
 import subprocess
 import sys
 from collections.abc import Callable
@@ -16,6 +17,7 @@ PACKAGES: dict[str, str] = {
     "faster_whisper": "faster-whisper",
     "yt_dlp": "yt-dlp[default]",
     "imageio_ffmpeg": "imageio-ffmpeg",
+    "rapidocr": "rapidocr",
 }
 
 
@@ -57,6 +59,7 @@ def report_tools(ffmpeg: Tool | None, ytdlp: Tool | None, js_runtime: Tool | Non
         ready = False
     else:
         ready = report_tool("JavaScript runtime", js_runtime) and ready
+    ready = report_ocr() and ready
     return ready
 
 
@@ -84,6 +87,38 @@ def cache_model(name: str) -> bool:
     print(f"caching Whisper model '{name}' (first time downloads it, then works offline)")
     WhisperModel(name, device="cpu", compute_type="int8")
     return True
+
+
+def report_ocr() -> bool:
+    try:
+        module = importlib.import_module("rapidocr")
+    except ImportError:
+        print("OCR: rapidocr missing")
+        return False
+    version = getattr(module, "__version__", None)
+    if not version:
+        try:
+            version = importlib.metadata.version("rapidocr")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+    print(f"OCR: rapidocr {version}")
+    return True
+
+
+def warm_ocr() -> bool:
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+    from ocr import ocr_key_frames
+    image = Image.new("RGB", (520, 120), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((12, 30), "R\u00e9sum\u00e9", fill="black", font=ImageFont.load_default())
+    try:
+        result = ocr_key_frames([("setup-warmup.png", np.asarray(image))], min_score=0.5)
+    except Exception as error:
+        print(f"OCR warmup failed: {error}")
+        return False
+    print("OCR model ready" if result.get("setup-warmup.png") is not None else "OCR warmup failed")
+    return result.get("setup-warmup.png") is not None
 
 
 def main() -> int:
@@ -132,6 +167,8 @@ def main() -> int:
     if args.check and not args.no_model_download and not model_cached(args.model):
         return 1
     if not args.check and not args.no_model_download and not cache_model(args.model):
+        return 1
+    if not args.check and not warm_ocr():
         return 1
     if not ready:
         print("NOT READY")

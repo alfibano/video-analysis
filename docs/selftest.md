@@ -23,6 +23,13 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | rerun exit 0 and frames untouched | a rerun resumes without redoing finished work |
 | changed parameters refused with exit 3 | a guard refuses to mix outputs made with other settings |
 | non-empty folder without manifest refused with exit 3 | a guard refuses to adopt a folder it did not create |
+| build bundle writes JSON from extract outputs | chapter coverage, frame PTS and transcript provenance make it into `bundle.json` |
+| bundle works without fetch outputs | local extraction data is sufficient when fetch metadata and captions are absent |
+| bundle with fake fetch outputs prefers manual subtitles | manual language captions take priority over automatic captions |
+| bundle manifest resumes and conflicts safely | identical settings reuse output; changed settings exit 3 |
+| extract preserves bundle manifest params | later extraction keeps `params.bundle` and its stage |
+| OCR readiness reported by setup | setup reports a RapidOCR version or a clear missing state |
+| real OCR smoke | generated `Résumé` text is recognized, or reports `SKIP` when RapidOCR is unavailable |
 | fetch manifest accepted by extract | v2 hand-off retains fetch data while extract records its own settings |
 | subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |
 | v0.1 manifest remains compatible | older flat manifests are migrated to v2 in memory |
@@ -48,6 +55,9 @@ python video-analysis/scripts/selftest.py --full     # also runs Whisper (model 
 python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where test files go
 python video-analysis/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
 ```
+
+The default suite uses a fake OCR engine for orchestration and runs a real OCR smoke when RapidOCR
+is installed. That smoke reports `SKIP` when the package is unavailable; it does not fail the suite.
 
 Exit code `0` = every check passed, `1` = at least one failed.
 Network mode writes its download under `<work-dir>/network` (or the fresh test folder).

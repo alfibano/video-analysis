@@ -316,11 +316,12 @@ def check_documentation_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     return all("fetch_video.py" in text and "setup_tools.py --check" in text
                and "selftest.py --network" in text and "frames.json" in text
+               and "build_bundle.py" in text and "bundle.json" in text
                for text in (skill, readme))
 
 
 def check_script_help_contract() -> bool:
-    scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py")
+    scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py")
     for script in scripts:
         result = subprocess.run([sys.executable, str(HERE / script), "-h"],
                                 capture_output=True, text=True, check=False)
@@ -519,6 +520,139 @@ def check_ocr_is_lazy() -> bool:
                    for node in tree.body)
 
 
+def check_setup_ocr_readiness() -> bool:
+    import setup_tools
+    fake = SimpleNamespace(__version__="9.8.7")
+    output = io.StringIO()
+    with patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            contextlib.redirect_stdout(output):
+        present = setup_tools.report_ocr()
+    missing_output = io.StringIO()
+    with patch.object(setup_tools.importlib, "import_module", side_effect=ImportError("missing")), \
+            contextlib.redirect_stdout(missing_output):
+        missing = setup_tools.report_ocr()
+    return (present and not missing and "OCR: rapidocr 9.8.7" in output.getvalue()
+            and "OCR: rapidocr missing" in missing_output.getvalue())
+
+
+def check_build_bundle(video: Path) -> bool:
+    result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
+                            capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.append(result.stdout + result.stderr)
+    if result.returncode != 0:
+        return False
+    work = video.parent / f"{video.stem}.analysis"
+    bundle = json.loads((work / "bundle.json").read_text(encoding="utf-8"))
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    chapters = bundle["chapters"]
+    frames = [frame for chapter in chapters for frame in chapter["frames"]]
+    return (chapters and chapters[0]["start"] == 0 and chapters[-1]["end"] >= 19.9
+            and bundle["source"]["duration"] >= 19.9
+            and all(frame["pts"] is not None for frame in frames)
+            and bundle["speech"]["source"] in {"whisper", "none"}
+            and manifest["params"]["bundle"]["ocr_engine"] == "skipped")
+
+
+def check_bundle_without_fetch() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-no-fetch-")
+    video = folder / "local.mp4"
+    video.write_bytes(b"identity only")
+    work = folder / "local.analysis"
+    work.mkdir()
+    (work / "metadata.json").write_text(json.dumps({"duration": 8, "chapters": []}), encoding="utf-8")
+    (work / "frames.json").write_text(json.dumps({"f00001.jpg": 0}), encoding="utf-8")
+    (work / "frames").mkdir()
+    (work / "frames" / "f00001.jpg").write_bytes(b"placeholder")
+    (work / "keyframes.txt").write_text("00:00:00.000  frames/f00001.jpg\n", encoding="utf-8")
+    stat = video.stat()
+    (work / "manifest.json").write_text(json.dumps({"schema_version": 2,
+        "source": {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+        "params": {"fetch": {}, "extract": {"interval": 5}}, "stages": {}}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
+                            capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.append(result.stdout + result.stderr)
+    return result.returncode == 0 and json.loads((work / "bundle.json").read_text(encoding="utf-8"))["speech"]["source"] == "none"
+
+
+def check_bundle_manual_subtitle() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-manual-subtitle-")
+    video = folder / "lecture.mp4"
+    video.write_bytes(b"identity only")
+    work = folder / "lecture.analysis"
+    work.mkdir()
+    (work / "metadata.json").write_text(json.dumps({"duration": 10, "language": "fr"}), encoding="utf-8")
+    (work / "raw_info.json").write_text(json.dumps({"language": "fr", "subtitles": {"fr": [{}]},
+        "automatic_captions": {"fr": [{}]}}), encoding="utf-8")
+    (work / "lecture.fr.vtt").write_text("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nTexte manuel\n", encoding="utf-8")
+    stat = video.stat()
+    (work / "manifest.json").write_text(json.dumps({"schema_version": 2,
+        "source": {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+        "params": {"fetch": {}, "extract": {"interval": 5}}, "stages": {}}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
+                            capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.append(result.stdout + result.stderr)
+    if result.returncode:
+        return False
+    bundle = json.loads((work / "bundle.json").read_text(encoding="utf-8"))
+    return bundle["speech"]["source"] == "manual" and bundle["chapters"][0]["speech_text"] == "Texte manuel"
+
+
+def check_bundle_manifest_resume_conflict(video: Path) -> bool:
+    work = video.parent / f"{video.stem}.analysis"
+    target = HERE / "build_bundle.py"
+    command = [sys.executable, str(target), str(video), "--skip-ocr"]
+    before = (work / "bundle.json").stat().st_mtime_ns
+    resume = subprocess.run(command, capture_output=True, text=True, check=False)
+    after = (work / "bundle.json").stat().st_mtime_ns
+    changed = subprocess.run([sys.executable, str(target), str(video), "--skip-ocr", "--language", "fr"],
+                             capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.extend((resume.stdout + resume.stderr, changed.stdout + changed.stderr))
+    return resume.returncode == 0 and before == after and changed.returncode == 3
+
+
+def check_extract_preserves_bundle_params() -> bool:
+    from extract_video import load_manifest
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-preserve-")
+    data = {"schema_version": 2, "source": {"path": "video.mp4"},
+            "params": {"fetch": {}, "extract": {"interval": 5}, "bundle": {"ocr_engine": "skipped"}},
+            "stages": {"bundle": {"status": "done"}}}
+    (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    result = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5})
+    return result["params"]["bundle"] == {"ocr_engine": "skipped"} and "bundle" in result["stages"]
+
+
+def check_real_ocr_smoke() -> tuple[bool, str]:
+    try:
+        from ocr import ocr_key_frames
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return True, "SKIP"
+    image = Image.new("RGB", (800, 160), "white")
+    font = next((ImageFont.truetype(name, 56) for name in ("arial.ttf", "DejaVuSans.ttf")
+                 if _font_available(ImageFont, name)), ImageFont.load_default())
+    ImageDraw.Draw(image).text((20, 35), "R\u00e9sum\u00e9", fill="black", font=font)
+    try:
+        recognized = ocr_key_frames([("smoke.png", np.asarray(image))]).get("smoke.png", "")
+    except ImportError:
+        return True, "SKIP"
+    import unicodedata
+    normalized = "".join(char for char in unicodedata.normalize("NFKD", recognized.casefold())
+                         if not unicodedata.combining(char))
+    return "resume" in normalized, "PASS" if "resume" in normalized else f"FAIL: OCR read {recognized!r}"
+
+
+def _font_available(font_module: object, name: str) -> bool:
+    try:
+        font_module.truetype(name, 56)
+    except OSError:
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -587,11 +721,16 @@ def main() -> int:
             checks["wav is 16 kHz mono PCM16"] = (stream.getframerate(), stream.getnchannels(),
                                                   stream.getsampwidth()) == (16_000, 1, 2)
         checks["transcript files written"] = (work / "transcript.json").exists() and (work / "transcript.txt").exists()
+    checks["build bundle writes JSON from extract outputs"] = run_check(
+        "build bundle writes JSON from extract outputs", lambda: check_build_bundle(video))
+    checks["bundle manifest resumes and conflicts safely"] = run_check(
+        "bundle manifest resumes and conflicts safely", lambda: check_bundle_manifest_resume_conflict(video))
     try:
         checks["ffmpeg resolution precedence"] = run_check("ffmpeg resolution precedence", check_tool_resolution)
         checks["yt-dlp resolved as module when CLI absent"] = run_check("yt-dlp resolved as module when CLI absent", check_ytdlp_module_resolution)
         checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
         checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
+        checks["OCR readiness reported by setup"] = run_check("OCR readiness reported by setup", check_setup_ocr_readiness)
         checks["metadata normalization fixture"] = run_check("metadata normalization fixture", check_metadata_fixture)
         checks["temporary folders live in the app _temp folder"] = run_check(
             "temporary folders live in the app _temp folder",
@@ -613,6 +752,14 @@ def main() -> int:
             "sponsor spans remain flagged and summary text excludes them", check_bundle_sponsors)
         checks["OCR runs on key frames only"] = run_check("OCR runs on key frames only", check_ocr_key_frames)
         checks["OCR adapter is lazy"] = run_check("OCR adapter is lazy", check_ocr_is_lazy)
+        checks["bundle works without fetch outputs"] = run_check("bundle works without fetch outputs", check_bundle_without_fetch)
+        checks["bundle with fake fetch outputs prefers manual subtitles"] = run_check(
+            "bundle with fake fetch outputs prefers manual subtitles", check_bundle_manual_subtitle)
+        checks["extract preserves bundle manifest params"] = run_check(
+            "extract preserves bundle manifest params", check_extract_preserves_bundle_params)
+        real_ocr_ok, real_ocr_status = check_real_ocr_smoke()
+        checks["real OCR smoke"] = real_ocr_ok
+        CHECK_OUTPUTS["real OCR smoke"] = real_ocr_status
         if args.network:
             checks["network fetch and extract"] = run_check(
                 "network fetch and extract", lambda: check_network_fetch(args.network, folder / "network"))
@@ -620,7 +767,8 @@ def main() -> int:
         print(f"FAIL  new checks raised {type(error).__name__}: {error}")
         checks["new checks completed"] = False
     for name, passed in checks.items():
-        print(f"{'PASS' if passed else 'FAIL'}  {name}")
+        prefix = CHECK_OUTPUTS.get(name) if name == "real OCR smoke" else None
+        print(f"{prefix or ('PASS' if passed else 'FAIL')}  {name}")
         if not passed and CHECK_OUTPUTS.get(name):
             for line in CHECK_OUTPUTS[name].rstrip().splitlines():
                 print(f"    {line}")

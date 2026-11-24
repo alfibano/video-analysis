@@ -30,8 +30,9 @@ python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # verify
 python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
 ```
 Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
-`faster-whisper`, `yt-dlp[default]`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
-system ffmpeg is found; then caches the Whisper `small` model. Tool resolution: environment override
+`faster-whisper`, `rapidocr`, `yt-dlp[default]`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
+system ffmpeg is found; then caches the Whisper `small` model and warms OCR once so its model downloads
+during setup. Tool resolution: environment override
 (`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
 JavaScript runtime (Deno, else Node). `--check` prints each tool with its origin. Exit 0 = `READY`.
 Network is used only by setup and by `fetch_video.py`; local analysis is offline.
@@ -67,6 +68,7 @@ For a local video, or after fetching a URL, extract frames and transcript:
 
 ```bash
 python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" --language fr
+python ~/.claude/skills/video-analysis/scripts/build_bundle.py "<video path>" --language fr
 ```
 Run it in the **background** for videos longer than a few minutes: transcription runs ~5x faster
 than real time on CPU (a 15 min video takes ~3 min). Options: `--interval 5` (seconds between
@@ -81,10 +83,25 @@ in `frames.json`, `sheets\` (3x3 contact sheets, each image stamped hh:mm:ss.mmm
 different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = processing failure,
 2 = bad input.
 
+## 2b. Build the bundle
+
+After extraction, run `build_bundle.py "<video path>"` (add `--language fr` to select captions,
+or `--skip-ocr` when OCR is unavailable). It reads only files in `.analysis` and writes `bundle.json`,
+which groups chapter speech, sampled frames with exact PTS, SponsorBlock overlap flags, and OCR text
+read from key frames. Sponsor speech and frames remain represented and carry `is_sponsor`;
+sponsored speech is excluded from `speech_text`. OCR is a text reading aid, not a visual
+description, and scans key frames only. Sampled frames can miss brief events, and an
+empty chapter may have no frame; the bundle does not choose a nearest frame.
+
 ## 3. Read — in this order
 
-a. **The whole transcript first** (`transcript.txt`). In courses and demos, the decisive content
-   (numbers, rules, exceptions, the real method) is very often **in the voice, not on screen**.
+If `bundle.json` exists, read it first instead of reopening raw files. It has chapter speech, frame
+paths and PTS, sponsor flags, and key-frame OCR text. `ocr_text: null` means OCR was not run on that
+frame; an empty string means it was scanned without finding text.
+
+a. **The speech**: each chapter's `speech_text` in `bundle.json`, else the whole transcript
+   (`transcript.txt`). In courses and demos, the decisive content (numbers, rules, exceptions,
+   the real method) is very often **in the voice, not on screen**.
 b. **The key-frame sheets** (`keysheets\`) to see each distinct slide/screen once.
 c. **The contact sheets** (`sheets\`) — all of them, in order, to follow what moves between key
    frames (cursor, drawings, charts updating).

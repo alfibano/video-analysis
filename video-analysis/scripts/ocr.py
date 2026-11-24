@@ -1,7 +1,6 @@
 """Lazy adapter for local RapidOCR key-frame recognition."""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -16,10 +15,10 @@ class KeyFrameOcr:
 
     def _get_engine(self) -> Any:
         if self._engine is None:
-            logging.getLogger("RapidOCR").setLevel(logging.WARNING)
             if self.engine_factory is None:
                 from rapidocr import RapidOCR
-                self._engine = RapidOCR()
+                # RapidOCR re-applies its own log level at init, so it must be passed as a parameter.
+                self._engine = RapidOCR(params={"Global.log_level": "warning"})
             else:
                 self._engine = self.engine_factory()
         return self._engine

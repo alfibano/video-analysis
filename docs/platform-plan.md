@@ -1,6 +1,19 @@
-# Platform evolution — design and step 1 plan
+# Platform evolution — design and delivery plan
 
-Status: **step 1 implemented** (2026-11-24).
+Status: **steps 1 and 2 implemented** (2026-11-24).
+
+## Step 2 — aligned bundle
+
+`build_bundle.py <video>` writes `bundle.json` inside the existing `.analysis` folder, using only
+its metadata, captions, transcript, frame timestamps, key-frame list, and SponsorBlock intervals.
+The video is used only for path/size/mtime identity. `params.bundle` and `stages.bundle` record the
+settings and result; same-settings reruns resume, while mismatches or untracked bundle files exit 3.
+
+Decisions: metadata chapters then deterministic fallback; manual VTT/SRT then automatic VTT/SRT,
+then Whisper, then empty speech; OCR with RapidOCR on key frames only; sponsor content stays present
+and is flagged, with sponsored speech omitted from `speech_text`. Output is `bundle.json` only.
+There is no description timestamp parser, no bundle.md, and no nearest-frame fallback. OCR setup
+warms the model once, while `--skip-ocr` records an intentional omission.
 
 ## Vision
 Turn the `video-analysis` skill into a learning platform: from a local or online video, produce a

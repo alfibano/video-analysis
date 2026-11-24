@@ -200,6 +200,8 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") == 2:
         recorded_params = manifest.get("params", {})
+        other_params = {key: value for key, value in recorded_params.items()
+                        if key not in {"fetch", "extract"}}
         extract_params = recorded_params.get("extract", {})
         fetch_params = recorded_params.get("fetch", {})
         fetch_only_unconfigured = not extract_params
@@ -207,6 +209,7 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         # v0.1 stored extraction settings directly in params.
         fetch_params = {}
         extract_params = manifest.get("params", {})
+        other_params = {}
         fetch_only_unconfigured = False
         manifest = {"schema_version": 2, "source": manifest.get("source"),
                     "params": {"fetch": fetch_params, "extract": extract_params},
@@ -219,7 +222,7 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
             f"  recorded: {manifest.get('source')} {extract_params}\n"
             f"  now:      {identity} {params}\n"
             "Send that folder to the Recycle Bin (trash skill), then re-run.")
-    manifest["params"] = {"fetch": fetch_params, "extract": extract_params}
+    manifest["params"] = {"fetch": fetch_params, "extract": extract_params, **other_params}
     return manifest
 
 
