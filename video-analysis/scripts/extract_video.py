@@ -4,10 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import queue
 import subprocess
 import sys
+import threading
 import wave
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -86,6 +91,9 @@ def load_frame_stamps(work: Path) -> dict[str, float]:
 def frame_time(frame: Path, interval: float, stamps: dict[str, float]) -> float:
     if frame.name in stamps:
         return stamps[frame.name]
+    match = re.fullmatch(r"t(\d{6})\.(\d{3})", frame.stem)
+    if match:
+        return int(match.group(1)) + int(match.group(2)) / 1000
     return (int(frame.stem[1:]) - 1) * interval
 
 
@@ -99,23 +107,147 @@ def frame_label(frame: Path, interval: float, stamps: dict[str, float]) -> str:
     return timestamp(frame_time(frame, interval, stamps))
 
 
-def parse_showinfo(log: str) -> list[float]:
-    return [float(value) for value in re.findall(r"pts_time:([-+]?\d+(?:\.\d+)?)", log)]
+def frame_filename(pts: float) -> str:
+    """Return a lexically sortable timestamp name derived from rounded PTS milliseconds."""
+    if not 0 <= pts <= 999_999.999:
+        raise ExtractionError(f"frame PTS is outside the supported range: {pts}")
+    milliseconds = int(round(pts * 1000))
+    seconds, millis = divmod(milliseconds, 1000)
+    return f"t{seconds:06d}.{millis:03d}.jpg"
 
 
-def extract_frames(video: Path, work: Path, interval: float) -> int:
+def _showinfo_reader(stream: BinaryIO, records: queue.Queue[tuple[float, int, int] | None]) -> None:
+    pattern = re.compile(r"pts_time:([-+]?\d+(?:\.\d+)?).*?\bs:(\d+)x(\d+)")
+    try:
+        for line in stream:
+            match = pattern.search(line.decode("utf-8", errors="replace"))
+            if match:
+                records.put((float(match.group(1)), int(match.group(2)), int(match.group(3))))
+    finally:
+        records.put(None)
+
+
+def _read_exact(stream: BinaryIO, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        part = stream.read(size - len(chunks))
+        if not part:
+            break
+        chunks.extend(part)
+    if len(chunks) != size:
+        raise ExtractionError(f"ffmpeg returned an incomplete raw frame ({len(chunks)} of {size} bytes)")
+    return bytes(chunks)
+
+
+def _write_frame(folder: Path, pts: float, raw: bytes, size: tuple[int, int],
+                 stamps: dict[str, float]) -> None:
+    name = frame_filename(pts)
+    if name in stamps:
+        if stamps[name] == pts:
+            return
+        raise ExtractionError(f"frame PTS collision at rounded millisecond: {name}")
+    if (folder / name).exists():
+        raise ExtractionError(f"refusing to overwrite an existing frame: {name}")
+    image = Image.frombytes("RGB", size, raw)
+    image.save(folder / name, format="JPEG", quality=90)
+    stamps[name] = pts
+
+
+def _raw_frame_process(
+    video: Path, interval: float, adaptive: bool
+) -> tuple[subprocess.Popen[bytes], queue.Queue[tuple[float, int, int] | None], threading.Thread]:
+    rate = "1" if adaptive else f"1/{interval}"
+    command = [ffmpeg_exe(), "-hide_banner", "-loglevel", "info", "-copyts", "-i", str(video),
+               "-an", "-vf", f"fps={rate},scale=960:-2,format=rgb24,showinfo",
+               "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    records: queue.Queue = queue.Queue()
+    thread = threading.Thread(target=_showinfo_reader, args=(process.stderr, records), daemon=True)
+    thread.start()
+    return process, records, thread
+
+
+def _raw_frames(video: Path, interval: float, adaptive: bool) -> Iterator[tuple[float, bytes, tuple[int, int]]]:
+    process, records, thread = _raw_frame_process(video, interval, adaptive)
+    try:
+        while (record := records.get()) is not None:
+            pts, width, height = record
+            yield pts, _read_exact(process.stdout, width * height * 3), (width, height)
+        if process.stdout.read(1):
+            raise ExtractionError("ffmpeg returned raw frames without matching showinfo PTS records")
+        process.stdout.close()
+        return_code = process.wait()
+        thread.join()
+        if return_code:
+            raise ExtractionError("ffmpeg frame pass failed")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if thread.is_alive():
+            thread.join(timeout=2)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def _thumbnail(raw: bytes, size: tuple[int, int]) -> np.ndarray:
+    image = Image.frombytes("RGB", size, raw).convert("L").resize(THUMB_SIZE, Image.Resampling.BOX)
+    return np.asarray(image, dtype=np.float32)
+
+
+@dataclass
+class FrameSelector:
+    folder: Path
+    interval: float
+    adaptive: bool
+    threshold: float
+    margin: float
+    stamps: dict[str, float] = field(default_factory=dict)
+    ring: deque[tuple[float, bytes, tuple[int, int], np.ndarray]] = field(default_factory=deque)
+    previous: np.ndarray | None = None
+    start_pts: float | None = None
+    next_grid: float = 0.0
+    active_until: float = float("-inf")
+
+    def add(self, pts: float, raw: bytes, size: tuple[int, int]) -> None:
+        if not self.adaptive:
+            _write_frame(self.folder, pts, raw, size, self.stamps)
+            return
+        thumb = _thumbnail(raw, size)
+        self.start_pts = pts if self.start_pts is None else self.start_pts
+        self._select_adaptive(pts, raw, size, thumb)
+
+    def _select_adaptive(self, pts: float, raw: bytes, size: tuple[int, int],
+                         thumb: np.ndarray) -> None:
+        relative = pts - self.start_pts
+        keep = relative + 1e-6 >= self.next_grid
+        if keep:
+            self.next_grid += max(1, int((relative - self.next_grid) // self.interval) + 1) * self.interval
+        changed = self.previous is not None and float(np.abs(thumb - self.previous).mean()) > self.threshold
+        if changed:
+            self.active_until = max(self.active_until, pts + self.margin)
+            for old_pts, old_raw, old_size, _ in self.ring:
+                if old_pts >= pts - self.margin:
+                    _write_frame(self.folder, old_pts, old_raw, old_size, self.stamps)
+        if keep or pts <= self.active_until:
+            _write_frame(self.folder, pts, raw, size, self.stamps)
+        self.previous = thumb
+        self.ring.append((pts, raw, size, thumb))
+        while self.ring and self.ring[0][0] < pts - self.margin:
+            self.ring.popleft()
+
+
+def extract_frames(video: Path, work: Path, interval: float, *, adaptive: bool = True,
+                   motion_threshold: float = 6.0, motion_margin: float = 1.0) -> int:
     folder = work / "frames"
     folder.mkdir(exist_ok=True)
-    log = run_ffmpeg(["-copyts", "-i", str(video), "-vf",
-                      f"fps=1/{interval},scale=960:-2,showinfo", "-q:v", "3",
-                      str(folder / "f%05d.jpg")], loglevel="info")
-    frames = sorted(folder.glob("f*.jpg"))
-    stamps = parse_showinfo(log)
-    if len(frames) != len(stamps):
-        raise ExtractionError(f"ffmpeg returned {len(frames)} frames but {len(stamps)} PTS values")
+    selector = FrameSelector(folder, interval, adaptive, motion_threshold, motion_margin)
+    for pts, raw, size in _raw_frames(video, interval, adaptive):
+        selector.add(pts, raw, size)
+    ordered = dict(sorted(selector.stamps.items(), key=lambda item: item[1]))
     (work / "frames.json").write_text(
-        json.dumps({frame.name: pts for frame, pts in zip(frames, stamps)}, indent=1), encoding="utf-8")
-    return len(frames)
+        json.dumps(ordered, indent=1), encoding="utf-8")
+    return len(ordered)
 
 
 def build_sheets(frames: list[Path], folder: Path, interval: float, stamps: dict[str, float]) -> int:
@@ -234,7 +366,7 @@ def folder_megabytes(folder: Path) -> float:
     return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file()) / 1_048_576
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=("Extract sampled frames, contact sheets, visible scene changes,\n"
@@ -250,6 +382,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("video", type=Path, help="local video file to analyze")
     parser.add_argument("--interval", type=float, default=5.0,
                         help="seconds between sampled frames (default: %(default)s)")
+    parser.add_argument("--fixed-interval", action="store_true",
+                        help="sample only at --interval instead of adaptive scene-aware sampling")
+    parser.add_argument("--motion-threshold", type=float, default=6.0,
+                        help="adaptive grayscale change threshold, 0-255 (default: %(default)s)")
+    parser.add_argument("--motion-margin", type=float, default=1.0,
+                        help="seconds retained before and after a change, 0-30 (default: %(default)s)")
     parser.add_argument("--dedup-threshold", type=float, default=6.0,
                         help="mean grey difference 0-255 for a key frame (default: %(default)s)")
     parser.add_argument("--model", default="small", help="Whisper model name (default: %(default)s)")
@@ -258,7 +396,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--skip-transcript", action="store_true", help="skip audio transcription")
     parser.add_argument("--at", type=parse_time, action="append", default=[],
                         help="also save a full-resolution frame at HH:MM:SS[.mmm]; repeatable")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -266,8 +404,14 @@ def run(args: argparse.Namespace) -> None:
     work = video.parent / f"{video.stem}.analysis"
     stat = video.stat()
     identity = {"path": str(video), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    adaptive = not args.fixed_interval
     params = {"interval": args.interval, "dedup_threshold": args.dedup_threshold,
-              "model": args.model, "language": args.language}
+              "model": args.model, "language": args.language,
+              "sampling_mode": "adaptive" if adaptive else "fixed",
+              "sampling_fps": 1 if adaptive else 1 / args.interval,
+              "motion_threshold": args.motion_threshold,
+              "motion_margin_s": args.motion_margin,
+              "sampler_version": 1, "frame_naming": "pts_ms_v1"}
     work.mkdir(exist_ok=True)
     manifest = load_manifest(work, identity, params)
     stages = manifest["stages"]
@@ -275,8 +419,10 @@ def run(args: argparse.Namespace) -> None:
     save_manifest(work, manifest)
 
     if not args.skip_frames and not stages.get("frames"):
-        count = extract_frames(video, work, args.interval)
-        frames = sorted((work / "frames").glob("f*.jpg"))
+        count = extract_frames(video, work, args.interval, adaptive=adaptive,
+                               motion_threshold=args.motion_threshold,
+                               motion_margin=args.motion_margin)
+        frames = sorted((work / "frames").glob("*.jpg"))
         stamps = load_frame_stamps(work)
         sheets = build_sheets(frames, work / "sheets", args.interval, stamps)
         keys = key_frames(frames, args.dedup_threshold)
@@ -307,9 +453,9 @@ def run(args: argparse.Namespace) -> None:
     print("When finished with this video, send that folder to the Recycle Bin (trash skill).")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
-        args = parse_arguments()
+        args = parse_arguments(argv)
     except SystemExit as exit_signal:
         return 0 if exit_signal.code == 0 else 2
     if not args.video.is_file():
@@ -317,6 +463,15 @@ def main() -> int:
         return 2
     if args.interval <= 0:
         print("--interval must be > 0")
+        return 2
+    if not args.fixed_interval and args.interval < 1:
+        print("--interval must be at least 1 in adaptive mode")
+        return 2
+    if not 0 <= args.motion_threshold <= 255:
+        print("--motion-threshold must be between 0 and 255")
+        return 2
+    if not 0 <= args.motion_margin <= 30:
+        print("--motion-margin must be between 0 and 30")
         return 2
     if not 0 < args.dedup_threshold < 255:
         print("--dedup-threshold must be between 0 and 255")

@@ -4,6 +4,8 @@
 
 - OCR uses a bounded ONNX thread count and reports throttled progress.
 - Fetch reports bounded yt-dlp progress for terminal and redirected output.
+- Adaptive sampling keeps the base grid and frames around detected changes; --fixed-interval opts out.
+- Sampled frame names encode rounded PTS milliseconds; frames.json remains authoritative.
 
 ### Added
 - `build_bundle.py` creates a chapter-aligned `bundle.json` from `.analysis` files, with subtitle/Whisper speech, frame PTS, sponsor flags, and key-frame OCR. It resumes identical settings and refuses manifest conflicts.
@@ -12,6 +14,8 @@
   metadata, subtitles, SponsorBlock marks without removing video segments, and a v2 hand-off manifest.
 - `extract_video.py` accepts fetch manifests, migrates v0.1 manifests, and writes container PTS to
   `frames.json` for timestamp labels.
+- `extract_video.py` decodes one RGB frame pass for adaptive or fixed sampling and records sampling
+  settings in the extraction manifest.
 - `setup_tools.py --check` reports tool paths and origins; self-test adds offline hand-off checks and
   optional `--network URL` fetch plus extraction.
 - Temporary and self-test work uses the installed skill's `_temp` folder, with `VIDEO_ANALYSIS_TEMP_DIR`

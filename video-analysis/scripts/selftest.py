@@ -385,12 +385,69 @@ def check_offset_pts(folder: Path) -> bool:
     work = folder / "offset.analysis"
     stamps = json.loads((work / "frames.json").read_text(encoding="utf-8"))
     loaded_stamps = load_frame_stamps(work)
-    frames = sorted((work / "frames").glob("f*.jpg"))
+    frames = sorted((work / "frames").glob("t*.jpg"))
     labels = (work / "keyframes.txt").read_text(encoding="utf-8")
-    return (completed == 0 and frames and abs(frame_time(frames[0], 2, loaded_stamps) - 2.0) <= 0.05
+    return (completed == 0 and frames and frames[0].name == "t000002.000.jpg"
+            and abs(frame_time(frames[0], 2, loaded_stamps) - 2.0) <= 0.05
             and abs(stamps[frames[0].name] - 2.0) <= 0.05
             and "00:00:02.000" in labels and frame_label(frames[0], 2, loaded_stamps) == "00:00:02.000"
             and resolve_ffmpeg() is not None)
+
+
+def check_adaptive_sampling_and_timestamp_names(folder: Path) -> bool:
+    from extract_video import ExtractionError, _write_frame, frame_filename
+    video = folder / "adaptive.mp4"
+    make_video(video)
+    completed = extract(video, "--skip-transcript")
+    work = folder / "adaptive.analysis"
+    stamps = json.loads((work / "frames.json").read_text(encoding="utf-8"))
+    names = list(stamps)
+    pts = [stamps[name] for name in names]
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    params = manifest["params"]["extract"]
+    collision = folder / "collision-frames"
+    collision.mkdir()
+    collision_stamps: dict[str, float] = {}
+    _write_frame(collision, 1.0001, b"\0\0\0", (1, 1), collision_stamps)
+    try:
+        _write_frame(collision, 1.0002, b"\0\0\0", (1, 1), collision_stamps)
+    except ExtractionError:
+        collision_refused = True
+    else:
+        collision_refused = False
+    try:
+        frame_filename(1_000_000)
+    except ExtractionError:
+        range_refused = True
+    else:
+        range_refused = False
+    return (completed == 0 and all(name == frame_filename(stamps[name]) for name in names)
+            and names == sorted(names) and pts == sorted(pts)
+            and frame_filename(999_999.999) == "t999999.999.jpg"
+            and collision_refused and range_refused
+            and all(any(abs(value - target) < 0.05 for value in pts)
+                    for target in (0, 5, 9, 10, 11, 15))
+            and params.get("sampling_mode") == "adaptive"
+            and params.get("sampling_fps") == 1
+            and params.get("motion_threshold") == 6.0
+            and params.get("motion_margin_s") == 1.0
+            and params.get("sampler_version") == 1
+            and params.get("frame_naming") == "pts_ms_v1")
+
+
+def check_fixed_interval_opt_out(folder: Path) -> bool:
+    video = folder / "fixed.mp4"
+    make_video(video)
+    completed = extract(video, "--skip-transcript", "--fixed-interval")
+    work = folder / "fixed.analysis"
+    stamps = json.loads((work / "frames.json").read_text(encoding="utf-8"))
+    params = json.loads((work / "manifest.json").read_text(encoding="utf-8"))["params"]["extract"]
+    changed = extract(video, "--skip-transcript", "--fixed-interval", "--motion-threshold", "7")
+    switched = extract(video, "--skip-transcript")
+    return (completed == 0 and len(stamps) == 4
+            and all(abs(stamps[name] - target) < 0.05 for name, target in zip(stamps, (0, 5, 10, 15)))
+            and params.get("sampling_mode") == "fixed"
+            and changed == 3 and switched == 3)
 
 
 def make_video(target: Path) -> None:
@@ -547,8 +604,17 @@ def check_ocr_thread_tuning_and_progress() -> bool:
         with patch("ocr.os.cpu_count", return_value=8):
             configured = KeyFrameOcr()._get_engine().params
     output = io.StringIO()
+    now = [0.0]
     result = ocr_key_frames(frames, lambda: FakeEngine(), stream=output,
                             monotonic=lambda: now[0])
+    tty_output = io.StringIO()
+    tty_output.isatty = lambda: True
+    clock = [0.0]
+    def advance_clock() -> float:
+        clock[0] += 0.5
+        return clock[0]
+    ocr_key_frames(frames, lambda: FakeEngine(), stream=tty_output, monotonic=advance_clock)
+    tty_updates = tty_output.getvalue().count("\r")
     return (counts == {None: 1, 1: 1, 14: 7, 20: 8, 64: 8}
             and configured == {"Global.log_level": "warning",
                                "EngineConfig.onnxruntime.intra_op_num_threads": 4}
@@ -556,7 +622,8 @@ def check_ocr_thread_tuning_and_progress() -> bool:
             and skipped_params["ocr_intra_op_threads"] is None
             and result["f0.jpg"] == "text"
             and "OCR 1/10" in output.getvalue() and "OCR 10/10" in output.getvalue()
-            and 1 <= len(output.getvalue().splitlines()) <= 12)
+            and 1 <= len(output.getvalue().splitlines()) <= 12
+            and tty_updates / clock[0] <= 2)
 
 
 def check_ocr_runtime_setting_not_in_resume_key() -> bool:
@@ -597,6 +664,16 @@ def check_fetch_progress_policy() -> bool:
     unknown({"status": "downloading", "downloaded_bytes": 1024})
     unknown({"status": "downloading", "downloaded_bytes": 2048})
     unknown({"status": "finished", "downloaded_bytes": 2048})
+    two_files = io.StringIO()
+    consecutive = make_progress_hook(stream=two_files, monotonic=lambda: 0.0)
+    for filename, downloaded, total, status in (
+        ("video.mp4", 1, 100, "downloading"), ("video.mp4", 57, 100, "downloading"),
+        ("video.mp4", 100, 100, "downloading"), ("video.mp4", 100, 100, "finished"),
+        ("audio.m4a", 1, 20, "downloading"), ("audio.m4a", 11, 20, "downloading"),
+        ("audio.m4a", 20, 20, "downloading"), ("audio.m4a", 20, 20, "finished"),
+    ):
+        consecutive({"status": status, "filename": filename,
+                     "downloaded_bytes": downloaded, "total_bytes": total})
     options = build_ydl_options(Path("."))
     return (redirected == ["FETCH 1%", "FETCH 10%", "FETCH 20%", "FETCH 30%",
                            "FETCH 40%", "FETCH 50%", "FETCH 60%", "FETCH 70%",
@@ -604,7 +681,12 @@ def check_fetch_progress_policy() -> bool:
             and tty_output.getvalue().count("\r") <= 2
             and "\n" in tty_output.getvalue() and options.get("noprogress") is True
             and len(options.get("progress_hooks", [])) == 1
-            and unknown_output.getvalue().splitlines() == ["FETCH 0.0 MB", "FETCH 0.0 MB"])
+            and unknown_output.getvalue().splitlines() == ["FETCH 0.0 MB", "FETCH 0.0 MB"]
+            and two_files.getvalue().splitlines() == [
+                "FETCH 1%", "FETCH 10%", "FETCH 20%", "FETCH 30%", "FETCH 40%",
+                "FETCH 50%", "FETCH 60%", "FETCH 70%", "FETCH 80%", "FETCH 90%", "FETCH 100%",
+                "FETCH 5%", "FETCH 10%", "FETCH 20%", "FETCH 30%", "FETCH 40%",
+                "FETCH 50%", "FETCH 60%", "FETCH 70%", "FETCH 80%", "FETCH 90%", "FETCH 100%"])
 
 
 def check_setup_ocr_readiness() -> bool:
@@ -772,7 +854,7 @@ def main() -> int:
     first = extract(video, *skip, "--at", "00:00:12.250")
     first_output = LAST_EXTRACT_OUTPUT
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
-    frames_mtime = (work / "frames" / "f00001.jpg").stat().st_mtime
+    frames_mtime = next((work / "frames").glob("*.jpg")).stat().st_mtime
     second = extract(video, *skip)
     second_output = LAST_EXTRACT_OUTPUT
     conflict = extract(video, *skip, "--interval", "3")
@@ -786,13 +868,13 @@ def main() -> int:
     checks = {
         "first run exit 0": first == 0,
         "folder created next to the video": work.parent == video.parent,
-        "4 frames at 5 s interval": manifest["stages"]["frames"]["frames"] == 4,
+        "adaptive base grid and change margin": manifest["stages"]["frames"]["frames"] >= 6,
         "1 contact sheet": len(list((work / "sheets").glob("*.jpg"))) == 1,
         "scene change detected (2 key frames)": manifest["stages"]["frames"]["keyframes"] == 2,
         "exact frame at 00:00:12.250": (work / "at" / "at_00h00m12s250.jpg").exists(),
         "audio detected": manifest["has_audio"] is True,
         "rerun exit 0 and frames untouched": second == 0
-        and (work / "frames" / "f00001.jpg").stat().st_mtime == frames_mtime,
+        and next((work / "frames").glob("*.jpg")).stat().st_mtime == frames_mtime,
         "changed parameters refused with exit 3": conflict == 3,
         "non-empty folder without manifest refused with exit 3": orphan_refused == 3,
     }
@@ -832,6 +914,10 @@ def main() -> int:
         checks["documentation contract current"] = run_check("documentation contract current", check_documentation_contract)
         checks["every script help describes itself"] = run_check("every script help describes itself", check_script_help_contract)
         checks["offset container PTS preserved"] = run_check("offset container PTS preserved", lambda: check_offset_pts(folder))
+        checks["adaptive sampling and timestamp names"] = run_check(
+            "adaptive sampling and timestamp names", lambda: check_adaptive_sampling_and_timestamp_names(folder))
+        checks["fixed interval opt out"] = run_check(
+            "fixed interval opt out", lambda: check_fixed_interval_opt_out(folder))
         checks["chapter source precedence and bounds"] = run_check("chapter source precedence and bounds", check_bundle_chapters)
         checks["subtitle priority and rolling VTT dedupe"] = run_check("subtitle priority and rolling VTT dedupe", check_bundle_subtitle_priority)
         checks["srt and vtt normalize to segments"] = run_check("srt and vtt normalize to segments", check_bundle_subtitle_parsers)

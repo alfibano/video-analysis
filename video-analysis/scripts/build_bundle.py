@@ -5,6 +5,7 @@ import argparse
 import importlib.metadata
 import json
 import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,8 +101,13 @@ def _frames(work: Path, interval: float) -> tuple[dict[str, Any], list[str]]:
     if not values:
         frame_dir = work / "frames"
         if frame_dir.is_dir():
-            values = {f"frames/{path.name}": (int(path.stem[1:]) - 1) * interval
-                      for path in sorted(frame_dir.glob("f*.jpg"))}
+            candidates = sorted([*frame_dir.glob("f*.jpg"), *frame_dir.glob("t*.jpg")])
+            values = {}
+            for path in candidates:
+                match = re.fullmatch(r"t(\d{6})\.(\d{3})", path.stem)
+                pts = (int(match.group(1)) + int(match.group(2)) / 1000 if match
+                       else (int(path.stem[1:]) - 1) * interval)
+                values[f"frames/{path.name}"] = pts
     else:
         values = {name if "/" in name or "\\" in name else f"frames/{name}": pts
                   for name, pts in values.items()}

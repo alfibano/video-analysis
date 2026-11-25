@@ -27,9 +27,15 @@ def make_progress_hook(*, stream: Any = None, monotonic: Callable[[], float] | N
     progress = ProgressWriter(stream, monotonic)
     latest_bytes = 0
     total_bytes: int | None = None
+    current_filename: str | None = None
 
     def hook(status: dict[str, Any]) -> None:
-        nonlocal latest_bytes, total_bytes
+        nonlocal latest_bytes, total_bytes, current_filename, progress
+        filename = str(status.get("filename") or "")
+        if filename and filename != current_filename:
+            progress = ProgressWriter(stream, monotonic)
+            latest_bytes, total_bytes = 0, None
+            current_filename = filename
         downloaded = status.get("downloaded_bytes")
         if isinstance(downloaded, (int, float)):
             latest_bytes = max(0, int(downloaded))
@@ -49,6 +55,7 @@ def make_progress_hook(*, stream: Any = None, monotonic: Callable[[], float] | N
                 progress.update(100.0 if total_bytes else None, render, final=True)
             else:
                 progress.update(None, lambda _: "FETCH failed", final=True)
+            latest_bytes, total_bytes, current_filename = 0, None, None
         else:
             progress.update(percent, render)
     return hook

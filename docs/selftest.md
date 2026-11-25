@@ -15,7 +15,9 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 |---|---|
 | first run exit 0 | the pipeline runs end to end |
 | folder created next to the video | the working folder lands beside the video, nowhere else |
-| 4 frames at 5 s interval | frame sampling follows `--interval` |
+| adaptive base grid and change margin | adaptive sampling keeps the base grid and one-second window around a scene change |
+| adaptive sampling and timestamp names | sampled JPEG names use rounded PTS milliseconds and remain in timestamp order |
+| fixed interval opt out | --fixed-interval keeps the five-second grid and sampling settings participate in resume checks |
 | 1 contact sheet | contact sheets are built |
 | scene change detected (2 key frames) | key-frame detection keeps changes and drops duplicates |
 | exact frame at 00:00:12.250 | `--at` extracts a frame at an exact instant |
@@ -32,6 +34,7 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | OCR uses bounded ONNX threads and reports progress | CPU thread selection is clamped and OCR progress follows terminal/redirected output policy |
 | OCR runtime thread count does not invalidate bundle resume | changing only the ONNX thread setting resumes the existing bundle |
 | fetch progress is bounded by output mode | yt-dlp progress hooks report bounded percentage or unknown-size progress |
+| offset container PTS preserved | timestamp names and `frames.json` preserve a nonzero container offset |
 | real OCR smoke | generated `Résumé` text is recognized, or reports `SKIP` when RapidOCR is unavailable |
 | fetch manifest accepted by extract | v2 hand-off retains fetch data while extract records its own settings |
 | subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |
