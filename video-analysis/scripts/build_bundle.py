@@ -231,10 +231,16 @@ def _speech_segments(inputs: BundleInputs, source: Any) -> list[SpeechSegment]:
 
 def _bundle_params(args: argparse.Namespace) -> dict[str, Any]:
     engine = "skipped" if args.skip_ocr else _ocr_version()
+    if args.skip_ocr:
+        ocr_threads = None
+    else:
+        import os
+        from ocr import default_ocr_threads
+        ocr_threads = default_ocr_threads(os.cpu_count())
     return {"language": args.language, "ocr_min_score": args.ocr_min_score,
             "min_chapter": args.min_chapter, "max_chapter": args.max_chapter,
             "target_chapter": args.target_chapter, "skip_ocr": args.skip_ocr,
-            "ocr_engine": engine}
+            "ocr_engine": engine, "ocr_intra_op_threads": ocr_threads}
 
 
 def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
@@ -250,7 +256,11 @@ def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
     if stage is None:
         print("bundle.json exists without a bundle manifest stage")
         return 3
-    if previous != params:
+    previous_signature = dict(previous or {})
+    current_signature = dict(params)
+    previous_signature.pop("ocr_intra_op_threads", None)
+    current_signature.pop("ocr_intra_op_threads", None)
+    if previous_signature != current_signature:
         print(f"bundle manifest conflict: recorded {previous}; now {params}")
         return 3
     print(f"BUNDLE: resumed | chapters {stage.get('chapters', 0)} | frames {stage.get('frames', 0)}")

@@ -182,9 +182,11 @@ def check_fetch_manifest() -> bool:
                                 and "remove" not in pp for pp in download_pp)
                         and "sponsorblock_mark" not in option_sets[1]
                         and "sponsorblock_remove" not in option_sets[1])
+    has_progress = all(option.get("noprogress") is True
+                       and len(option.get("progress_hooks", [])) == 1 for option in option_sets)
     return (calls == [False, True, True] and video.is_file() and (folder / "metadata.json").is_file()
             and manifest["params"]["fetch"]["url"].startswith("https://")
-            and "fetch" in accepted["stages"] and has_sponsorblock)
+            and "fetch" in accepted["stages"] and has_sponsorblock and has_progress)
 
 
 def check_subtitle_failure_is_best_effort() -> bool:
@@ -520,6 +522,91 @@ def check_ocr_is_lazy() -> bool:
                    for node in tree.body)
 
 
+def check_ocr_thread_tuning_and_progress() -> bool:
+    from ocr import KeyFrameOcr, default_ocr_threads, ocr_key_frames
+    import build_bundle
+    bundle_args = SimpleNamespace(skip_ocr=False, language=None, ocr_min_score=0.5,
+                                  min_chapter=30, max_chapter=300, target_chapter=120)
+    with patch.object(build_bundle, "_ocr_version", return_value="test"), \
+            patch("os.cpu_count", return_value=14):
+        bundle_params = build_bundle._bundle_params(bundle_args)
+    bundle_args.skip_ocr = True
+    with patch.object(build_bundle, "_ocr_version", return_value="skipped"):
+        skipped_params = build_bundle._bundle_params(bundle_args)
+    counts = {value: default_ocr_threads(value) for value in (None, 1, 14, 20, 64)}
+    class FakeEngine:
+        def __call__(self, _):
+            return SimpleNamespace(txts=["text"], scores=[0.9])
+    frames = [(f"f{i}.jpg", Path(f"f{i}.jpg")) for i in range(10)]
+    class FakeRapidOCR:
+        def __init__(self, *, params: dict[str, object]):
+            self.params = params
+        def __call__(self, _):
+            return SimpleNamespace(txts=["text"], scores=[0.9])
+    with patch.dict(sys.modules, {"rapidocr": SimpleNamespace(RapidOCR=FakeRapidOCR)}):
+        with patch("ocr.os.cpu_count", return_value=8):
+            configured = KeyFrameOcr()._get_engine().params
+    output = io.StringIO()
+    result = ocr_key_frames(frames, lambda: FakeEngine(), stream=output,
+                            monotonic=lambda: now[0])
+    return (counts == {None: 1, 1: 1, 14: 7, 20: 8, 64: 8}
+            and configured == {"Global.log_level": "warning",
+                               "EngineConfig.onnxruntime.intra_op_num_threads": 4}
+            and bundle_params["ocr_intra_op_threads"] == 7
+            and skipped_params["ocr_intra_op_threads"] is None
+            and result["f0.jpg"] == "text"
+            and "OCR 1/10" in output.getvalue() and "OCR 10/10" in output.getvalue()
+            and 1 <= len(output.getvalue().splitlines()) <= 12)
+
+
+def check_ocr_runtime_setting_not_in_resume_key() -> bool:
+    import build_bundle
+    from types import SimpleNamespace as NS
+    base = {"language": None, "ocr_min_score": 0.5, "min_chapter": 30,
+            "max_chapter": 300, "target_chapter": 120, "skip_ocr": False,
+            "ocr_engine": "test", "ocr_intra_op_threads": 4}
+    alternate = {**base, "ocr_intra_op_threads": 8}
+    inputs = NS(manifest={"source": {"path": "video"}, "params": {"bundle": base},
+                          "stages": {"bundle": {"status": "done"}}},
+                identity={"path": "video"}, work=Path("."))
+    with patch.object(Path, "exists", return_value=True):
+        resumed = build_bundle.resume_outcome(inputs, alternate) == 0
+        changed_semantics = {**alternate, "ocr_min_score": 0.6}
+        refused = build_bundle.resume_outcome(inputs, changed_semantics) == 3
+    return resumed and refused
+
+
+def check_fetch_progress_policy() -> bool:
+    from fetch_video import build_ydl_options, make_progress_hook
+    output = io.StringIO()
+    hook = make_progress_hook(stream=output, monotonic=lambda: 0.0)
+    for percent in (1, 4, 10, 11, 57, 99, 100):
+        hook({"status": "downloading", "downloaded_bytes": percent,
+              "total_bytes": 100})
+    hook({"status": "finished", "downloaded_bytes": 100, "total_bytes": 100})
+    redirected = output.getvalue().splitlines()
+    tty_output = io.StringIO()
+    tty_output.isatty = lambda: True
+    hook_tty = make_progress_hook(stream=tty_output, monotonic=lambda: 0.0)
+    for percent in (1, 4, 10, 11, 57, 99, 100):
+        hook_tty({"status": "downloading", "downloaded_bytes": percent,
+                  "total_bytes": 100})
+    hook_tty({"status": "finished", "downloaded_bytes": 100, "total_bytes": 100})
+    unknown_output = io.StringIO()
+    unknown = make_progress_hook(stream=unknown_output, monotonic=lambda: 0.0)
+    unknown({"status": "downloading", "downloaded_bytes": 1024})
+    unknown({"status": "downloading", "downloaded_bytes": 2048})
+    unknown({"status": "finished", "downloaded_bytes": 2048})
+    options = build_ydl_options(Path("."))
+    return (redirected == ["FETCH 1%", "FETCH 10%", "FETCH 20%", "FETCH 30%",
+                           "FETCH 40%", "FETCH 50%", "FETCH 60%", "FETCH 70%",
+                           "FETCH 80%", "FETCH 90%", "FETCH 100%"]
+            and tty_output.getvalue().count("\r") <= 2
+            and "\n" in tty_output.getvalue() and options.get("noprogress") is True
+            and len(options.get("progress_hooks", [])) == 1
+            and unknown_output.getvalue().splitlines() == ["FETCH 0.0 MB", "FETCH 0.0 MB"])
+
+
 def check_setup_ocr_readiness() -> bool:
     import setup_tools
     fake = SimpleNamespace(__version__="9.8.7")
@@ -550,7 +637,8 @@ def check_build_bundle(video: Path) -> bool:
             and bundle["source"]["duration"] >= 19.9
             and all(frame["pts"] is not None for frame in frames)
             and bundle["speech"]["source"] in {"whisper", "none"}
-            and manifest["params"]["bundle"]["ocr_engine"] == "skipped")
+            and manifest["params"]["bundle"]["ocr_engine"] == "skipped"
+            and manifest["params"]["bundle"]["ocr_intra_op_threads"] is None)
 
 
 def check_bundle_without_fetch() -> bool:
@@ -752,6 +840,12 @@ def main() -> int:
             "sponsor spans remain flagged and summary text excludes them", check_bundle_sponsors)
         checks["OCR runs on key frames only"] = run_check("OCR runs on key frames only", check_ocr_key_frames)
         checks["OCR adapter is lazy"] = run_check("OCR adapter is lazy", check_ocr_is_lazy)
+        checks["OCR uses bounded ONNX threads and reports progress"] = run_check(
+            "OCR uses bounded ONNX threads and reports progress", check_ocr_thread_tuning_and_progress)
+        checks["OCR runtime thread count does not invalidate bundle resume"] = run_check(
+            "OCR runtime thread count does not invalidate bundle resume", check_ocr_runtime_setting_not_in_resume_key)
+        checks["fetch progress is bounded by output mode"] = run_check(
+            "fetch progress is bounded by output mode", check_fetch_progress_policy)
         checks["bundle works without fetch outputs"] = run_check("bundle works without fetch outputs", check_bundle_without_fetch)
         checks["bundle with fake fetch outputs prefers manual subtitles"] = run_check(
             "bundle with fake fetch outputs prefers manual subtitles", check_bundle_manual_subtitle)

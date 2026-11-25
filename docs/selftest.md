@@ -29,6 +29,9 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | bundle manifest resumes and conflicts safely | identical settings reuse output; changed settings exit 3 |
 | extract preserves bundle manifest params | later extraction keeps `params.bundle` and its stage |
 | OCR readiness reported by setup | setup reports a RapidOCR version or a clear missing state |
+| OCR uses bounded ONNX threads and reports progress | CPU thread selection is clamped and OCR progress follows terminal/redirected output policy |
+| OCR runtime thread count does not invalidate bundle resume | changing only the ONNX thread setting resumes the existing bundle |
+| fetch progress is bounded by output mode | yt-dlp progress hooks report bounded percentage or unknown-size progress |
 | real OCR smoke | generated `Résumé` text is recognized, or reports `SKIP` when RapidOCR is unavailable |
 | fetch manifest accepted by extract | v2 hand-off retains fetch data while extract records its own settings |
 | subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |

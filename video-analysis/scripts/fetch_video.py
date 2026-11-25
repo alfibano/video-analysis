@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from metadata import normalize_metadata
+from progress import ProgressWriter
 from tools import resolve_ffmpeg, resolve_js_runtime
 
 SPONSOR_CATEGORIES = ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview",
@@ -18,6 +19,39 @@ SUBTITLE_SUFFIXES = {".vtt", ".srt", ".ass", ".lrc", ".json3", ".ttml"}
 
 class UnsupportedVideo(Exception):
     """The URL resolves to a playlist or a live broadcast."""
+
+
+def make_progress_hook(*, stream: Any = None, monotonic: Callable[[], float] | None = None
+                       ) -> Callable[[dict[str, Any]], None]:
+    """Create a bounded yt-dlp progress hook for percentage or unknown-size downloads."""
+    progress = ProgressWriter(stream, monotonic)
+    latest_bytes = 0
+    total_bytes: int | None = None
+
+    def hook(status: dict[str, Any]) -> None:
+        nonlocal latest_bytes, total_bytes
+        downloaded = status.get("downloaded_bytes")
+        if isinstance(downloaded, (int, float)):
+            latest_bytes = max(0, int(downloaded))
+        total = status.get("total_bytes") or status.get("total_bytes_estimate")
+        if isinstance(total, (int, float)) and total > 0:
+            total_bytes = int(total)
+        percent = latest_bytes * 100 / total_bytes if total_bytes else None
+
+        def render(value: float | None) -> str:
+            if value is None:
+                return f"FETCH {latest_bytes / (1024 * 1024):.1f} MB"
+            return f"FETCH {int(value)}%"
+
+        state = status.get("status")
+        if state in {"finished", "error"}:
+            if state == "finished":
+                progress.update(100.0 if total_bytes else None, render, final=True)
+            else:
+                progress.update(None, lambda _: "FETCH failed", final=True)
+        else:
+            progress.update(percent, render)
+    return hook
 
 
 def refuse_unsupported(info: dict[str, Any]) -> None:
@@ -45,6 +79,8 @@ def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
         "subtitleslangs": languages,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "progress_hooks": [make_progress_hook()],
     }
     # yt-dlp's Python API needs the postprocessor; the similarly named CLI
     # options are ignored here. Only request chapters for the download pass.

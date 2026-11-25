@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- OCR uses a bounded ONNX thread count and reports throttled progress.
+- Fetch reports bounded yt-dlp progress for terminal and redirected output.
+
 ### Added
 - `build_bundle.py` creates a chapter-aligned `bundle.json` from `.analysis` files, with subtitle/Whisper speech, frame PTS, sponsor flags, and key-frame OCR. It resumes identical settings and refuses manifest conflicts.
 - `setup_tools.py` installs RapidOCR when missing, reports OCR readiness, and warms its model during normal setup; bundling supports `--skip-ocr`.
