@@ -117,6 +117,36 @@ class CorrectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkRun:
+    client: Any
+    model: str
+    context: str
+    max_workers: int = 2
+    chunk_ordinals: Sequence[int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetryTarget:
+    output: dict[str, Any]
+    chunks: Sequence[int]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCorrection:
+    state: CorrectionStage
+    settings: CorrectionSettings
+    retry_model: str
+    missing_implicit_host: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionRuntime:
+    request: CorrectionRequest
+    deps: CorrectionDeps
+    missing_implicit_host: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CorrectionStage:
     video: Path
     work: Path
@@ -491,27 +521,28 @@ def _source_data(video: Path, work: Path, inputs: SourceSelectionInputs) -> tupl
         source, work, inputs.transcript if isinstance(inputs.transcript, Mapping) else {})
 
 
-def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
-                              segments: Sequence[Any]) -> list[str] | None:
-    """Load corrected text only when its complete source and segment contract still matches."""
+def _correction_source_matches(work: Path, params: Mapping[str, Any], source: Any) -> bool:
     if source.source not in {"whisper", "automatic"}:
-        return None
-    try:
-        output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
-        source_params = params["source"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(output, dict) or not isinstance(source_params, Mapping):
-        return None
-    source_file = Path(source.file or "").name
+        return False
     source_path = work / Path(source.file or "")
     try:
         stat = source_path.stat()
-    except OSError:
-        return None
+        source_params = params["source"]
+    except (OSError, KeyError, TypeError):
+        return False
+    if not isinstance(source_params, Mapping):
+        return False
+    source_file = Path(source.file or "").name
     if (source_params.get("kind") != source.source or source_params.get("language") != source.language
             or source_params.get("file") != source_file or source_params.get("size") != stat.st_size
             or source_params.get("mtime_ns") != stat.st_mtime_ns):
+        return False
+    return True
+
+
+def _correction_output_matches(output: Any, params: Mapping[str, Any], source: Any,
+                               segments: Sequence[Any]) -> list[str] | None:
+    if not isinstance(output, dict) or not _correction_source_matches_from_params(params, source):
         return None
     expected_source = {key: params["source"][key] for key in ("kind", "language", "file")}
     rows = output.get("segments")
@@ -534,6 +565,25 @@ def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
             return None
         corrected.append(row["corrected_text"])
     return corrected
+
+
+def _correction_source_matches_from_params(params: Mapping[str, Any], source: Any) -> bool:
+    source_params = params.get("source")
+    return (isinstance(source_params, Mapping) and source_params.get("kind") == source.source
+            and source_params.get("language") == source.language
+            and source_params.get("file") == Path(source.file or "").name)
+
+
+def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
+                              segments: Sequence[Any]) -> list[str] | None:
+    """Load corrected text only when its complete source and segment contract still matches."""
+    if not _correction_source_matches(work, params, source):
+        return None
+    try:
+        output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return _correction_output_matches(output, params, source, segments)
 
 
 def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> CorrectionSettings:
@@ -561,13 +611,10 @@ def _resume_decision(state: CorrectionStage) -> int | None:
     return 0
 
 
-def _consent_decision(state: CorrectionStage, settings: CorrectionSettings
-                      ) -> tuple[dict[str, Any] | None, int | None]:
-    manifest = state.manifest
-    if not consent_required(manifest["source"]["kind"], settings.locality):
-        return None, None
+def ask_or_refuse_remote_ai(settings: CorrectionSettings) -> tuple[bool, str | None, int | None]:
+    """Ask for transcript-sharing consent, or return the flag grant/refusal."""
     if settings.allow_remote_ai:
-        return {"granted": True, "method": "flag"}, None
+        return True, "flag", None
     can_prompt = (sys.stdin.isatty() and sys.stdout.isatty() if settings.interactive is None
                   else settings.interactive)
     accepted = False
@@ -577,40 +624,64 @@ def _consent_decision(state: CorrectionStage, settings: CorrectionSettings
         except EOFError:
             accepted = False
     if accepted:
-        return {"granted": True, "method": "interactive"}, None
-    manifest["stages"]["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
-    _write_manifest(state.work / "manifest.json", manifest)
+        return True, "interactive", None
     print("Remote AI consent is required for transcripts from local media; pass --allow-remote-ai.",
           file=sys.stderr)
-    return None, 4
+    return False, None, 4
 
 
-def _correct_chunks(client: Any, model: str, context: str, speech: Sequence[Any], *,
-                    max_workers: int = 2, chunk_ordinals: Sequence[int] | None = None
+def _build_stage_context(metadata: Mapping[str, Any], language: str) -> str:
+    chapters = [str(item.get("title") or "") for item in metadata.get("chapters", [])
+                if isinstance(item, Mapping)]
+    return build_context(metadata.get("title"), metadata.get("description"), language, chapters)
+
+
+def make_client(settings: CorrectionSettings, deps: CorrectionDeps) -> Any:
+    """Construct the selected provider adapter using the shared runtime dependencies."""
+    if settings.provider == "claude-code":
+        return ClaudeCodeClient(executable=settings.executable or "claude", runner=deps.subprocess_runner)
+    if settings.provider == "codex":
+        return CodexClient(executable=settings.executable or "codex", runner=deps.subprocess_runner)
+    factory = deps.client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
+    local = settings.locality == "local"
+    return factory(api_key=settings.api_key, base_url=settings.base_url,
+                   timeout=900.0 if local else 120.0, max_retries=2)
+
+
+def _consent_decision(state: CorrectionStage, settings: CorrectionSettings
+                      ) -> tuple[dict[str, Any] | None, int | None]:
+    manifest = state.manifest
+    if not consent_required(manifest["source"]["kind"], settings.locality):
+        return None, None
+    accepted, method, error = ask_or_refuse_remote_ai(settings)
+    if accepted:
+        return {"granted": True, "method": method}, None
+    manifest["stages"]["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
+    _write_manifest(state.work / "manifest.json", manifest)
+    return None, error
+
+
+def _run_chunk(run: ChunkRun, chunk: tuple[int, list[CorrectionInput]]) -> tuple[
+        int, list[CorrectedSegment], TokenUsage, float | None]:
+    first_id, items = chunk
+    try:
+        response = run.client.correct(model=run.model, system_prompt=SYSTEM_PROMPT,
+                                      user_prompt=build_chunk_prompt(run.context, items, first_id))
+        outcome = _provider_result(response)
+        if not outcome.refusal and is_prose_refusal(outcome.text, list(range(first_id, first_id + len(items)))):
+            outcome = ProviderResult(outcome.text, refusal=True, usage=outcome.usage,
+                                     reported_cost_usd=outcome.reported_cost_usd)
+    except Exception as error:  # Any provider failure must fall back to the original chunk.
+        print(f"correction provider failure: {type(error).__name__}", file=sys.stderr)
+        outcome = ProviderResult(None, error=True)
+    return first_id, correct_chunk(items, outcome, first_id=first_id), outcome.usage, outcome.reported_cost_usd
+
+
+def _collect_chunks(run: ChunkRun, chunks: Sequence[tuple[int, list[CorrectionInput]]]
                     ) -> tuple[list[CorrectedSegment], dict[str, int], int, float | None, bool]:
-    chunks = chunk_segments([CorrectionInput(item.start, item.end, item.text) for item in speech])
-    if chunk_ordinals is not None:
-        chunks = [chunk for ordinal, chunk in enumerate(chunks, 1) if ordinal in chunk_ordinals]
-
-    def call_chunk(chunk: tuple[int, list[CorrectionInput]]) -> tuple[
-            int, list[CorrectedSegment], TokenUsage, float | None]:
-        first_id, items = chunk
-        try:
-            response = client.correct(model=model, system_prompt=SYSTEM_PROMPT,
-                                      user_prompt=build_chunk_prompt(context, items, first_id))
-            outcome = _provider_result(response)
-            if not outcome.refusal and is_prose_refusal(outcome.text,
-                                                        list(range(first_id, first_id + len(items)))):
-                outcome = ProviderResult(outcome.text, refusal=True, usage=outcome.usage,
-                                         reported_cost_usd=outcome.reported_cost_usd)
-        except Exception as error:  # Any provider failure must fall back to the original chunk.
-            print(f"correction provider failure: {type(error).__name__}", file=sys.stderr)
-            outcome = ProviderResult(None, error=True)
-        return first_id, correct_chunk(items, outcome, first_id=first_id), outcome.usage, outcome.reported_cost_usd
-
     results: dict[int, tuple[list[CorrectedSegment], TokenUsage, float | None]] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(call_chunk, chunk) for chunk in chunks]
+    with ThreadPoolExecutor(max_workers=run.max_workers) as pool:
+        futures = [pool.submit(_run_chunk, run, chunk) for chunk in chunks]
         for future in as_completed(futures):
             first_id, rows, usage, cost = future.result()
             results[first_id] = (rows, usage, cost)
@@ -629,6 +700,14 @@ def _correct_chunks(client: Any, model: str, context: str, speech: Sequence[Any]
         else:
             reported_cost += cost
     return corrected, totals, len(chunks), (reported_cost if cost_complete else None), cost_complete
+
+
+def _correct_chunks(run: ChunkRun, speech: Sequence[Any]
+                    ) -> tuple[list[CorrectedSegment], dict[str, int], int, float | None, bool]:
+    chunks = chunk_segments([CorrectionInput(item.start, item.end, item.text) for item in speech])
+    if run.chunk_ordinals is not None:
+        chunks = [chunk for ordinal, chunk in enumerate(chunks, 1) if ordinal in run.chunk_ordinals]
+    return _collect_chunks(run, chunks)
 
 
 def _write_correction_result(state: CorrectionStage, settings: CorrectionSettings,
@@ -676,13 +755,48 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
 def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request: CorrectionRequest,
                    deps: CorrectionDeps) -> int:
     stage = state.stage
+    retry_target, error = _load_retry_targets(state)
+    if error is not None:
+        return error
+    targets = retry_target.chunks
+    if not targets:
+        print("CORRECTION: no refused chunks to retry")
+        return 0
+    if not request.model:
+        print("--retry-refused requires an explicit higher --model", file=sys.stderr)
+        return 2
+    if settings.provider != state.params.get("provider"):
+        print("retry provider changed", file=sys.stderr)
+        return 2
+    if settings.model == state.params["model"]:
+        print("retry model must differ from the recorded model", file=sys.stderr)
+        return 2
+    consent_record = stage.get("consent")
+    needs_consent = consent_required(state.manifest["source"]["kind"], settings.locality)
+    if needs_consent and not (isinstance(consent_record, Mapping) and consent_record.get("granted")):
+        accepted, _, error = ask_or_refuse_remote_ai(settings)
+        if not accepted:
+            return error or 4
+    if settings.provider not in {"claude-code", "codex"}:
+        print("refused-chunk retry is supported for host-account providers", file=sys.stderr)
+        return 2
+    client = make_client(settings, deps)
+    context = _build_stage_context(state.metadata, state.source.language or "unknown")
+    run = ChunkRun(client, settings.model, context, 2, targets)
+    new_rows, new_usage, chunk_count, cost, cost_complete = _correct_chunks(run, state.speech)
+    result = CorrectionResult(new_rows, new_usage, chunk_count, cost, cost_complete)
+    return _write_retry_result(state, settings, retry_target, result)
+
+
+def _load_retry_targets(state: CorrectionStage) -> tuple[RetryTarget | None, int | None]:
+    stage = state.stage
     if stage.get("status") != "done" or not isinstance(stage.get("refused_chunks"), list):
         print("refused-chunk retry requires a completed correction stage", file=sys.stderr)
-        return 3
+        return None, 3
     if state.previous != state.params or load_matching_correction(
             state.work, state.params, state.source, state.speech) is None:
         print("completed correction settings or output changed", file=sys.stderr)
-        return 3
+        return None, 3
     targets = [int(value) for value in stage["refused_chunks"]]
     output = json.loads(state.output_path.read_text(encoding="utf-8"))
     expected_refused = [index + 1 for index, start in enumerate(range(0, len(output.get("segments", [])), CHUNK_SIZE))
@@ -690,48 +804,15 @@ def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request
                                for row in output["segments"][start:start + CHUNK_SIZE])]
     if stage["refused_chunks"] != expected_refused:
         print("recorded refused chunks do not match the corrected output", file=sys.stderr)
-        return 3
-    if not targets:
-        print("CORRECTION: no refused chunks to retry")
-        return 0
-    if not request.model:
-        print("--retry-refused requires an explicit higher --model", file=sys.stderr)
-        return 2
-    previous_model = state.params["model"]
-    if settings.provider != state.params.get("provider"):
-        print("retry provider changed", file=sys.stderr)
-        return 2
-    if settings.model == previous_model:
-        print("retry model must differ from the recorded model", file=sys.stderr)
-        return 2
-    consent_record = stage.get("consent")
-    if consent_required(state.manifest["source"]["kind"], settings.locality) and not (
-            isinstance(consent_record, Mapping) and consent_record.get("granted")):
-        if not settings.allow_remote_ai:
-            can_prompt = (sys.stdin.isatty() and sys.stdout.isatty() if settings.interactive is None
-                          else settings.interactive)
-            try:
-                accepted = bool(can_prompt and input(
-                    "Send transcript text and video context to the configured remote AI? [y/N] ").strip().casefold() == "y")
-            except EOFError:
-                accepted = False
-            if not accepted:
-                print("Remote AI consent is required for transcripts from local media; pass --allow-remote-ai.",
-                      file=sys.stderr)
-                return 4
-    if settings.provider == "claude-code":
-        client = ClaudeCodeClient(executable=settings.executable or "claude", runner=deps.subprocess_runner)
-    elif settings.provider == "codex":
-        client = CodexClient(executable=settings.executable or "codex", runner=deps.subprocess_runner)
-    else:
-        print("refused-chunk retry is supported for host-account providers", file=sys.stderr)
-        return 2
-    context = build_context(state.metadata.get("title"), state.metadata.get("description"),
-                            state.source.language or "unknown",
-                            [str(item.get("title") or "") for item in state.metadata.get("chapters", [])
-                             if isinstance(item, Mapping)])
-    new_rows, new_usage, chunk_count, cost, cost_complete = _correct_chunks(
-        client, settings.model, context, state.speech, max_workers=2, chunk_ordinals=targets)
+        return None, 3
+    return RetryTarget(output, targets), None
+
+
+def _write_retry_result(state: CorrectionStage, settings: CorrectionSettings,
+                        target: RetryTarget, result: CorrectionResult) -> int:
+    output, targets, new_rows = target.output, target.chunks, result.rows
+    new_usage, cost, cost_complete = result.usage, result.reported_cost_usd, result.cost_complete
+    stage = state.stage
     rows = output["segments"]
     retry_counts: dict[str, int] = {}
     cursor = 0
@@ -766,17 +847,14 @@ def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request
     return 0
 
 
-def run_correction(video: Path, request: CorrectionRequest | None = None,
-                   deps: CorrectionDeps | None = None) -> int:
-    """Select, authorize, run, and safely persist one correction stage."""
-    request = request or CorrectionRequest()
-    deps = deps or CorrectionDeps(os.environ)
+def _prepare_correction(video: Path, request: CorrectionRequest,
+                        deps: CorrectionDeps) -> tuple[PreparedCorrection | None, int | None]:
     video = video.resolve()
     work = video.parent / f"{video.stem}.analysis"
     settings = _resolve_settings(request, deps)
     if settings.provider not in {"none", "claude-code", "codex", "openai", "local"}:
         print("unknown correction provider", file=sys.stderr)
-        return 2
+        return None, 2
     explicit_provider = bool((request.provider and request.provider != "auto")
                              or (deps.environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER")
                                  and deps.environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER") != "auto"))
@@ -784,12 +862,12 @@ def run_correction(video: Path, request: CorrectionRequest | None = None,
                                           or not (request.locality == "local"
                                                   or deps.environ.get("VIDEO_ANALYSIS_AI_LOCALITY") == "local")):
         print("local provider requires a base URL and explicit local locality", file=sys.stderr)
-        return 2
+        return None, 2
     missing_implicit_host = None
     if settings.provider in {"claude-code", "codex"} and not settings.executable:
         if explicit_provider:
             print(f"{settings.provider} executable is unavailable", file=sys.stderr)
-            return 2
+            return None, 2
         missing_implicit_host = settings.provider
         settings = CorrectionSettings("none", settings.model, settings.base_url, settings.locality,
                                       settings.api_key, settings.allow_remote_ai, settings.no_correct,
@@ -804,57 +882,65 @@ def run_correction(video: Path, request: CorrectionRequest | None = None,
                                           settings.no_correct, settings.interactive, settings.executable)
     state, load_error = _load_correction_stage(video, work, request.language, settings)
     if state is None:
-        return load_error or 1
-    metadata, source, speech = state.metadata, state.source, state.speech
-    manifest = state.manifest
-    stages = manifest["stages"]
+        return None, load_error or 1
+    return PreparedCorrection(state, settings, retry_model, missing_implicit_host), None
+
+
+def _run_loaded_correction(prepared: PreparedCorrection, request: CorrectionRequest,
+                           deps: CorrectionDeps) -> int:
+    state, settings = prepared.state, prepared.settings
     if request.retry_refused:
-        retry_settings = CorrectionSettings(settings.provider, retry_model, settings.base_url,
+        retry_settings = CorrectionSettings(settings.provider, prepared.retry_model, settings.base_url,
                                             settings.locality, settings.api_key, settings.allow_remote_ai,
                                             settings.no_correct, settings.interactive, settings.executable)
         return _retry_refused(state, retry_settings, request, deps)
     resumed = _resume_decision(state)
     if resumed is not None:
         return resumed
-    skip = correction_skip_reason(no_correct=settings.no_correct, source=source.source,
-                                  api_key=(settings.api_key if settings.provider in {"openai", "local"}
-                                           else "host-account" if settings.provider in {"claude-code", "codex"}
-                                           else None))
+    runtime = CorrectionRuntime(request, deps, prepared.missing_implicit_host)
+    return _continue_correction(state, settings, runtime)
+
+
+def _continue_correction(state: CorrectionStage, settings: CorrectionSettings,
+                         runtime: CorrectionRuntime) -> int:
+    api_key = settings.api_key if settings.provider in {"openai", "local"} else (
+        "host-account" if settings.provider in {"claude-code", "codex"} else None)
+    skip = correction_skip_reason(no_correct=settings.no_correct, source=state.source.source, api_key=api_key)
     if settings.provider == "none" and skip == "no API key":
-        skip = (f"{missing_implicit_host} executable is unavailable" if missing_implicit_host
+        skip = (f"{runtime.missing_implicit_host} executable is unavailable" if runtime.missing_implicit_host
                 else "no available correction provider")
     if skip:
-        stages["correct_transcript"] = {"status": "skipped", "reason": skip}
-        _write_manifest(work / "manifest.json", manifest)
+        state.manifest["stages"]["correct_transcript"] = {"status": "skipped", "reason": skip}
+        _write_manifest(state.work / "manifest.json", state.manifest)
         print(f"CORRECTION: skipped | {skip}")
         return 0
+    return _execute_correction(state, settings, runtime)
+
+
+def _execute_correction(state: CorrectionStage, settings: CorrectionSettings,
+                        runtime: CorrectionRuntime) -> int:
     consent, consent_error = _consent_decision(state, settings)
     if consent_error is not None:
         return consent_error
-    if settings.provider == "claude-code":
-        client = ClaudeCodeClient(executable=settings.executable or "claude", runner=deps.subprocess_runner)
-    elif settings.provider == "codex":
-        client = CodexClient(executable=settings.executable or "codex", runner=deps.subprocess_runner)
-    else:
-        factory = deps.client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
-        local = settings.locality == "local"
-        client = factory(api_key=settings.api_key, base_url=settings.base_url,
-                         timeout=900.0 if local else 120.0, max_retries=2)
-    language_value = source.language or "unknown"
-    chapter_titles = [str(item.get("title") or "") for item in metadata.get("chapters", []) if isinstance(item, Mapping)]
-    context = build_context(metadata.get("title"), metadata.get("description"), language_value, chapter_titles)
-    corrected_rows, usage_totals, chunk_count, reported_cost, cost_complete = _correct_chunks(
-        client, settings.model, context, speech, max_workers=1 if settings.locality == "local" else 2)
-    corrected_rows = [CorrectedSegment(item.start, item.end, item.original_text, item.corrected_text,
-                                       item.status, settings.provider, settings.model)
-                      for item in corrected_rows]
+    client = make_client(settings, runtime.deps)
+    context = _build_stage_context(state.metadata, state.source.language or "unknown")
+    run = ChunkRun(client, settings.model, context, 1 if settings.locality == "local" else 2)
+    corrected_rows, usage_totals, chunk_count, reported_cost, cost_complete = _correct_chunks(run, state.speech)
+    corrected_rows = [CorrectedSegment(row.start, row.end, row.original_text, row.corrected_text,
+                                       row.status, settings.provider, settings.model) for row in corrected_rows]
     _write_correction_result(state, settings, consent,
                              CorrectionResult(corrected_rows, usage_totals, chunk_count,
                                               reported_cost, cost_complete))
+    _print_escalation_if_needed(state, settings, runtime.request, consent)
+    return 0
+
+
+def _print_escalation_if_needed(state: CorrectionStage, settings: CorrectionSettings,
+                                request: CorrectionRequest, consent: dict[str, Any] | None) -> None:
     refused = state.manifest["stages"]["correct_transcript"].get("refused_chunks", [])
     higher = {"claude-code": "claude-sonnet-5-5", "codex": "gpt-5.6-sol"}
     if refused and settings.provider in higher and settings.model == provider_default_model(settings.provider):
-        command = [sys.executable, str(Path(__file__).resolve()), str(video), "--provider", settings.provider,
+        command = [sys.executable, str(Path(__file__).resolve()), str(state.video), "--provider", settings.provider,
                    "--language", request.language, "--retry-refused", "--model", higher[settings.provider]]
         if settings.locality == "local":
             command.extend(("--ai-locality", "local"))
@@ -862,7 +948,14 @@ def run_correction(video: Path, request: CorrectionRequest | None = None,
             command.append("--allow-remote-ai")
         rendered = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
         print(f"Refused chunks: {', '.join(map(str, refused))}. Escalation command: {rendered}")
-    return 0
+
+
+def run_correction(video: Path, request: CorrectionRequest | None = None,
+                   deps: CorrectionDeps | None = None) -> int:
+    """Select, authorize, run, and safely persist one correction stage."""
+    request, deps = request or CorrectionRequest(), deps or CorrectionDeps(os.environ)
+    prepared, error = _prepare_correction(video, request, deps)
+    return error if prepared is None else _run_loaded_correction(prepared, request, deps)
 
 
 def _parser() -> argparse.ArgumentParser:

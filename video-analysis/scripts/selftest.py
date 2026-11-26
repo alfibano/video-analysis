@@ -1173,6 +1173,29 @@ def check_correction_shared_helpers_and_speech_reader() -> bool:
             and callable(read_speech_segments) and CorrectTranscriptConfig is not None)
 
 
+def check_correction_shared_runtime_helpers() -> bool:
+    import correct_transcript as correction
+    settings = correction.CorrectionSettings("openai", "test-model", "https://local.invalid/v1",
+                                             "local", "local-no-key", True, False, False)
+    deps = correction.CorrectionDeps({}, client_factory=lambda **kwargs: kwargs)
+    client = correction.make_client(settings, deps)
+    context = correction._build_stage_context({
+        "title": "Title", "description": "Description", "chapters": [{"title": "Chapter"}]}, "fr")
+    accepted, method, error = correction.ask_or_refuse_remote_ai(settings)
+    tree = ast.parse((HERE / "correct_transcript.py").read_text(encoding="utf-8"))
+    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    def is_small(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+        if args and args[0].arg == "self":
+            args = args[1:]
+        return node.end_lineno - node.lineno + 1 <= 40 and len(args) <= 4
+    small_functions = all(is_small(node) for node in functions)
+    return (client == {"api_key": "local-no-key", "base_url": "https://local.invalid/v1",
+                       "timeout": 900.0, "max_retries": 2}
+            and "Title" in context and "Chapter" in context and "fr" in context
+            and accepted and method == "flag" and error is None and small_functions)
+
+
 def check_correction_consent_matrix() -> bool:
     from correct_transcript import consent_required
     return (consent_required("local", "remote")
@@ -1741,6 +1764,8 @@ def main() -> int:
             "correction refusal and malformed chunks keep originals", check_correction_safe_fallbacks)
         checks["correction DRY shared source and speech helpers"] = run_check(
             "correction DRY shared source and speech helpers", check_correction_shared_helpers_and_speech_reader)
+        checks["correction runtime helpers are shared"] = run_check(
+            "correction runtime helpers are shared", check_correction_shared_runtime_helpers)
         checks["correction consent matrix blocks before provider call"] = run_check(
             "correction consent matrix blocks before provider call", check_correction_consent_matrix_blocks_before_provider_call)
         checks["correction skip modes stay offline"] = run_check(
