@@ -21,7 +21,7 @@
   `frames.json` for timestamp labels.
 - `extract_video.py` decodes one RGB frame pass for adaptive or fixed sampling and records sampling
   settings in the extraction manifest.
-- `setup_tools.py --check` reports tool paths and origins; self-test adds offline hand-off checks and
+- `setup_tools.py --check` runs only the offline self-test; self-test adds offline hand-off checks and
   optional `--network URL` fetch plus extraction.
 - Temporary and self-test work uses the installed skill's `_temp` folder, with `VIDEO_ANALYSIS_TEMP_DIR`
   available to redirect it for sandboxed or CI runs.
@@ -29,11 +29,19 @@
 ### Fixed
 - Subtitle downloads run after the video as a best-effort pass. Missing or rate-limited subtitles are
   warned about and recorded in the fetch manifest without failing a successful video download.
+- Frame names now use container PTS; `frames.json` is authoritative instead of estimating time from
+  the sample index and interval.
 
 ### Documentation
 - `docs/selftest.md`: what the self-test checks, when to run it, usage, cleanup; presented in the
   README. The skill and README document URL fetch, tool setup, subtitles, and exact frame timestamps.
 - The skill and README document the fetch → extract → bundle workflow and bundle-first reading.
+
+### Measured
+- On a real 23-min talk, fixed extraction took 42 s and adaptive extraction took 73 s (ratio 1.74).
+- OCR was about 28% faster with bounded ONNX threads.
+- Parallel OCR workers were rejected after no gain was measured.
+- Splitting extraction into parallel portions was rejected after gains of 30 s or less.
 
 ## v0.1.0 — 2026-11-14 — first release
 
@@ -87,17 +95,15 @@ overclaiming.
 Gathered on 2026-11-14 from a survey of existing tools (unverified: found by web search, code not
 read). Ordered by expected value.
 
-1. **Scene-aware sampling** — denser frames when the screen changes, sparser when static, with a
-   frame cap; alongside the fixed interval. Seen in: claude-video (cap 100), claude-real-video.
-2. **Detail levels** — transcript-only / key frames / full, to spend only what the question needs.
+1. **Detail levels** — transcript-only / key frames / full, to spend only what the question needs.
    Seen in: claude-video.
-3. **SRT output** and word-level timestamps. Seen in: vidwise.
-4. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
+2. **SRT output** and word-level timestamps. Seen in: vidwise.
+3. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
    Seen in: talkthrough-mcp, media-context-mcp, VideoContext MCP.
-5. **Multilingual documentation** — README, docs and release notes in English (default), French
+4. **Multilingual documentation** — README, docs and release notes in English (default), French
    and Spanish at least, with a language switcher at the top of each page. Owner request,
    2026-11-14.
-6. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
+5. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
    the agent already describes images. Seen in: Framesleuth.
 
 Survey sources: [claude-video](https://github.com/bradautomates/claude-video) ·

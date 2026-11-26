@@ -1,6 +1,6 @@
 ---
 name: video-analysis
-description: Analyse a local video file - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Works fully offline on Windows without system ffmpeg.
+description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Works fully offline on Windows without system ffmpeg.
 ---
 
 # Video analysis — what is seen, what is said
@@ -23,10 +23,22 @@ Temporary and self-test work goes in the installed skill's `video-analysis/_temp
 Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
 Analysis outputs remain in `<video>.analysis/` next to the video.
 
+## Primary entry points
+
+- `setup_tools.py` installs missing tools, checks readiness, and ends with the offline self-test;
+  it prints `READY` only when setup and the self-test both succeed.
+- `setup_tools.py --check` runs only the offline self-test: no install, readiness report, or model
+  cache check.
+- `analyze_video.py <url-or-path>` fetches a URL if needed, then extracts and builds the bundle.
+  It prints `STEP fetch`, `STEP extract`, or `STEP bundle` on stderr, stops at the first failed
+  step with that step's exit code, and accepts `--sub-langs` only with a URL.
+
+Fetch progress and `OCR n/N` progress are bounded and printed on stderr.
+
 ## 1. Tools (once per machine)
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # verify tools and origins
+python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # offline self-test only
 python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
 ```
 Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
@@ -34,7 +46,9 @@ Installs only what is missing, with `pip --user` (no admin, no winget/choco): `P
 system ffmpeg is found; then caches the Whisper `small` model and warms OCR once so its model downloads
 during setup. Tool resolution: environment override
 (`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
-JavaScript runtime (Deno, else Node). `--check` prints each tool with its origin. Exit 0 = `READY`.
+JavaScript runtime (Deno, else Node). Normal setup prints `READY` only after setup and the offline
+self-test both succeed. `--check` runs only the offline self-test: it does not install tools, report
+readiness, or check the model cache.
 Network is used only by setup and by `fetch_video.py`; local analysis is offline.
 
 Whisper model: Whisper is OpenAI's open speech-recognition AI, run locally via `faster-whisper`; the
@@ -48,7 +62,7 @@ Self-test (synthetic video and offline contract checks, `--full` adds Whisper):
 Optional real URL check (downloads and extracts a video):
 `python ~/.claude/skills/video-analysis/scripts/selftest.py --network "<URL>"`
 
-## 2. Fetch or extract
+## Secondary tools
 
 For an online video, fetch it first. Playlists and live/upcoming streams are refused before any
 download. The video remains intact; SponsorBlock segments are marked in `sponsorblock.json` and
@@ -63,6 +77,9 @@ languages with `--sub-langs fr en`. The video downloads first; subtitles downloa
 best-effort pass, so subtitle errors (including rate limits) do not fail the fetch. Missing languages
 are reported in a warning and recorded in the fetch manifest. Fetch writes `metadata.json`, sanitized
 `raw_info.json`, available subtitle files, `sponsorblock.json`, and a v2 `manifest.json` into `<video>.analysis/`.
+Downloads use short safe names: an ASCII lowercase title of up to 40 characters, cut at a word
+boundary, followed by `_` and the video ID; the full stem is at most 60 characters. Local files
+are never renamed.
 
 For a local video, or after fetching a URL, extract frames and transcript:
 
@@ -88,10 +105,11 @@ different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = pro
 After extraction, run `build_bundle.py "<video path>"` (add `--language fr` to select captions,
 or `--skip-ocr` when OCR is unavailable). It reads only files in `.analysis` and writes `bundle.json`,
 which groups chapter speech, sampled frames with exact PTS, SponsorBlock overlap flags, and OCR text
-read from key frames. Sponsor speech and frames remain represented and carry `is_sponsor`;
-sponsored speech is excluded from `speech_text`. Every path in `bundle.json` is relative to the
-`.analysis` folder. OCR is a text reading aid, not a visual
-description, and scans key frames only. Sampled frames can miss brief events, and an
+read from key frames. Bundle schema 2 stores paths relative to the `.analysis` folder. A schema-1
+`bundle.json` is refused with exit 3; send that file to the Recycle Bin and rerun `build_bundle.py`.
+Transient key frames are not OCR'd and are marked `ocr_skipped: "transient"`. Sponsor speech and
+frames remain represented and carry `is_sponsor`; sponsored speech is excluded from `speech_text`.
+OCR is a text reading aid, not a visual description, and scans key frames only. Sampled frames can miss brief events, and an
 empty chapter may have no frame; the bundle does not choose a nearest frame.
 
 ## 3. Read — in this order
@@ -123,8 +141,10 @@ Always include:
 - the **gaps between what is written and what is said** (e.g. a slide says one thing and the voice
   adds the rule that actually matters, or contradicts it);
 - what is **only shown once** (a single demonstrated example is an illustration, not evidence);
-- **limits**: frames are sampled every N s and can miss brief events; a frame's stamp is its index
-  × interval, so it is approximate (± half an interval, more on variable-frame-rate recordings); key-frame dedup can hide small
+- **limits**: frame names `tSSSSSS.mmm.jpg` (e.g. `t000340.000.jpg`) come from container PTS;
+  `frames.json` is authoritative. Sampling is adaptive by default (base grid plus frames around
+  changes detected at 1 fps); `--fixed-interval` opts out. Changing the mode is refused by the
+  manifest (exit 3). Sampling can still miss brief events; key-frame dedup can hide small
   edits; Whisper misspells names and jargon (check against the images); no reliable reading of tone,
   emotion, music, speaker identity or motion.
 

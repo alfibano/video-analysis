@@ -334,10 +334,11 @@ def check_network_fetch(url: str, folder: Path) -> bool:
 def check_documentation_contract() -> bool:
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
-    return all("fetch_video.py" in text and "setup_tools.py --check" in text
-               and "selftest.py --network" in text and "frames.json" in text
-               and "build_bundle.py" in text and "bundle.json" in text
-               for text in (skill, readme))
+    required = ("fetch_video.py", "analyze_video.py", "setup_tools.py --check",
+                "selftest.py --network", "frames.json", "build_bundle.py", "bundle.json",
+                "Secondary tools", "--fixed-interval", "relative to the `.analysis` folder")
+    return (all(all(phrase in text for phrase in required) for text in (skill, readme))
+            and "analyse cette vidéo" in skill and "trash" in skill)
 
 
 def check_script_help_contract() -> bool:

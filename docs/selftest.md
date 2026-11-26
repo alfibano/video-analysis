@@ -28,15 +28,23 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | build bundle writes JSON from extract outputs | chapter coverage, frame PTS and transcript provenance make it into `bundle.json` |
 | bundle paths are relative to the analysis folder | source, speech and frame files resolve without absolute paths |
 | downloaded video names are short and safe | title and ID produce an ASCII stem no longer than 60 characters |
+| chapter source precedence and bounds | metadata chapters and fallback chapters follow the configured duration limits |
 | bundle works without fetch outputs | local extraction data is sufficient when fetch metadata and captions are absent |
 | bundle with fake fetch outputs prefers manual subtitles | manual language captions take priority over automatic captions |
+| subtitle priority and rolling VTT dedupe | subtitle sources are ordered and repeated rolling-window cues are deduplicated |
+| srt and vtt normalize to segments | both subtitle formats produce normalized timed speech segments |
 | bundle manifest resumes and conflicts safely | identical settings reuse output; changed settings exit 3 |
 | extract preserves bundle manifest params | later extraction keeps `params.bundle` and its stage |
+| frames align by exact PTS | frame assignment uses the stored presentation timestamps |
+| sponsor spans remain flagged and summary text excludes them | sponsor overlap is retained as metadata and omitted from summary-ready speech |
+| OCR runs on key frames only | OCR input is limited to detected key frames |
+| OCR adapter is lazy | OCR dependencies load only when OCR is requested |
 | OCR readiness reported by setup | setup reports a RapidOCR version or a clear missing state |
 | OCR uses bounded ONNX threads and reports progress | CPU thread selection is clamped and OCR progress follows terminal/redirected output policy |
 | OCR runtime thread count does not invalidate bundle resume | changing only the ONNX thread setting resumes the existing bundle |
 | transient key frames are not OCR'd | adaptive key frames followed within the sampling window are marked and omitted from OCR |
 | analyze_video local and URL pipelines | local input extracts then bundles; URL input fetches, extracts, and bundles through mocked steps |
+| analyze_video stops on failure | the pipeline stops at the first failed stage and returns its exit code |
 | setup installs then tests and check only tests | normal setup runs the offline self-test after readiness; --check runs only that test |
 | fetch progress is bounded by output mode | yt-dlp progress hooks report bounded percentage or unknown-size progress |
 | offset container PTS preserved | timestamp names and `frames.json` preserve a nonzero container offset |
@@ -48,6 +56,7 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | temporary folders live in the app _temp folder | test runs use the skill's `_temp` folder or `VIDEO_ANALYSIS_TEMP_DIR`, and scripts centralize temporary folder creation |
 | default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
 | documentation contract current | usage docs mention fetch, tool checks, network self-test and `frames.json` |
+| every script help describes itself | each command's help has valid sections, usage detail and exit codes |
 | *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
 | *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
 

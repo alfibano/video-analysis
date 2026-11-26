@@ -23,7 +23,7 @@ git clone https://github.com/alfibano/video-analysis.git
 #   mklink /J "%USERPROFILE%\.claude\skills\video-analysis" "<clone>\video-analysis"
 # or copy the video-analysis/ folder into ~/.claude/skills/
 python video-analysis/scripts/setup_tools.py        # installs tools and warms Whisper/OCR models
-python video-analysis/scripts/setup_tools.py --check # verifies tools and their origins
+python video-analysis/scripts/setup_tools.py --check # runs only the offline self-test
 python video-analysis/scripts/selftest.py           # offline checks on a synthetic video
 ```
 
@@ -36,7 +36,19 @@ release; `--full` also tests transcription. The default run stays offline; `--ne
 a real fetch and extraction (`python video-analysis/scripts/selftest.py --network "<url>"`). Details:
 [docs/selftest.md](docs/selftest.md).
 
-## Use
+## Primary entry points
+
+- `setup_tools.py` installs missing tools, checks readiness, and ends with the offline self-test;
+  it prints `READY` only when setup and the self-test both succeed.
+- `setup_tools.py --check` runs only the offline self-test: no install, readiness report, or model
+  cache check.
+- `analyze_video.py <url-or-path>` fetches a URL if needed, then extracts and builds the bundle.
+  It prints `STEP fetch`, `STEP extract`, or `STEP bundle` on stderr, stops at the first failed
+  step with that step's exit code, and accepts `--sub-langs` only with a URL.
+
+Fetch progress and `OCR n/N` progress are bounded and printed on stderr.
+
+## Secondary tools
 
 In Claude Code: "analyse this video: <path>". Or directly:
 
@@ -54,7 +66,10 @@ python video-analysis/scripts/build_bundle.py "<folder>/<video>.mp4" --language 
 
 Fetch writes normalized `metadata.json`, sanitized `raw_info.json`, available subtitle files,
 `sponsorblock.json` (segments marked, never removed), and a v2 manifest. Extract writes container
-timestamps in `frames.json` alongside the frames and transcript. Bundle writes `bundle.json` with
+timestamps in `frames.json` alongside the frames and transcript. Frame names `tSSSSSS.mmm.jpg`
+(e.g. `t000340.000.jpg`) come from container PTS; `frames.json` is authoritative. Sampling is
+adaptive by default (base grid plus frames around changes detected at 1 fps); `--fixed-interval`
+opts out, and changing the mode is refused by the manifest (exit 3). Bundle writes `bundle.json` with
 chapter speech, frame PTS, SponsorBlock flags, and OCR text from key frames. Read `bundle.json` first
 when present; use `--skip-ocr` to omit OCR. Sponsor intervals stay intact, and sponsored speech is
 flagged and omitted from each chapter's summary-ready `speech_text`.
@@ -62,6 +77,14 @@ flagged and omitted from each chapter's summary-ready `speech_text`.
 Everything goes to `<video folder>/<video name>.analysis/` — frames, sheets, key frames, audio,
 transcript, manifest — so it can be deleted in one go when you are done. The scripts never delete
 anything. Options and outputs: see [`video-analysis/SKILL.md`](video-analysis/SKILL.md).
+
+Bundles use schema 2, with paths relative to the `.analysis` folder. A schema-1 `bundle.json` is
+refused with exit 3; send that file to the Recycle Bin and rerun `build_bundle.py`. Transient key
+frames are not OCR'd and are marked `ocr_skipped: "transient"`.
+
+Online downloads use short safe names: an ASCII lowercase title of up to 40 characters, cut at a
+word boundary, followed by `_` and the video ID; the full stem is at most 60 characters. Local
+files are never renamed.
 
 Temporary and self-test work goes in the installed skill's `video-analysis/_temp` folder. The whole
 `_temp` folder can be sent to the Recycle Bin when no run is in progress; scripts never delete it.

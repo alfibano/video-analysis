@@ -1,6 +1,6 @@
 # Platform evolution — design and delivery plan
 
-Status: **steps 1 and 2 implemented** (2026-11-24).
+Status: **steps 1 and 2 implemented; scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-24).
 
 ## Step 2 — aligned bundle
 
@@ -50,8 +50,8 @@ OCR) → 3 local transcript correction → 4 PDF/PPTX sheet → later: knowledge
 3. Frame times come from container PTS (`frames.json`), used by sheets and `keyframes.txt`; on an
    offset-start video stamps match real time ±0.05 s.
 4. Tool resolution: env override → system PATH → bundled `imageio-ffmpeg`; `yt-dlp` installed only
-   if missing; JS runtime detected (deno, else node) for YouTube. `setup_tools.py --check` reports
-   each tool and its origin.
+   if missing; JS runtime detected (deno, else node) for YouTube. Normal setup reports readiness;
+   `setup_tools.py --check` runs only the offline self-test.
 5. Self-test stays green offline and gains the checks below; optional `--network URL` real fetch.
 6. SKILL.md, README, RELEASE_NOTES updated.
 
