@@ -281,6 +281,15 @@ def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
     bundle_path = inputs.work / "bundle.json"
     if not bundle_path.exists():
         return None
+    try:
+        existing_bundle = _json(bundle_path, {})
+    except ValueError as error:
+        print(f"bundle manifest conflict: {error}")
+        return 3
+    if existing_bundle.get("schema_version") == 1:
+        print("bundle manifest conflict: existing schema-1 bundle.json; send it to the Recycle Bin "
+              "and run build_bundle.py again")
+        return 3
     if stage is None:
         print("bundle.json exists without a bundle manifest stage")
         return 3

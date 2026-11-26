@@ -138,6 +138,7 @@ def check_fetch_manifest() -> bool:
     dest = make_temp_folder("video-analysis-manifest-")
     info = {"_type": "video", "id": "test-id", "title": "Sample video", "language": "fr",
             "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": []}
+    video_name = f"{fetch_video.safe_video_stem(info['title'], info['id'])}.mp4"
     calls: list[bool] = []
     option_sets: list[dict] = []
 
@@ -155,7 +156,7 @@ def check_fetch_manifest() -> bool:
         def extract_info(self, url: str, *, download: bool):
             calls.append(download)
             if download:
-                video = dest / "Sample_video_test-id.mp4"
+                video = dest / video_name
                 video.write_bytes(b"fake video")
                 info["requested_downloads"] = [{"filepath": str(video)}]
             return info
@@ -164,11 +165,11 @@ def check_fetch_manifest() -> bool:
             return value
 
         def prepare_filename(self, value: dict) -> str:
-            return str(dest / "Sample_video_test-id.mp4")
+            return str(dest / video_name)
 
     if fetch_video.main(["https://example.invalid/video", "--dest", str(dest)], ydl_factory=FakeYDL) != 0:
         return False
-    video = dest / "Sample_video_test-id.mp4"
+    video = dest / video_name
     folder = dest / f"{video.stem}.analysis"
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     accepted = load_manifest(folder, manifest["source"], {"interval": 5})
@@ -186,7 +187,24 @@ def check_fetch_manifest() -> bool:
                        and len(option.get("progress_hooks", [])) == 1 for option in option_sets)
     return (calls == [False, True, True] and video.is_file() and (folder / "metadata.json").is_file()
             and manifest["params"]["fetch"]["url"].startswith("https://")
+            and option_sets[1]["outtmpl"] == str(dest.resolve() / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.%(ext)s")
             and "fetch" in accepted["stages"] and has_sponsorblock and has_progress)
+
+
+def check_safe_video_stem() -> bool:
+    import fetch_video
+    examples = (
+        ("Avez-vous des électrons qui se trouvent dans les noyaux de vos atomes au moment où on se parle ?",
+         "Nim6yyD4QzI", "avez_vous_des_electrons_qui_se_trouvent_Nim6yyD4QzI"),
+        ("éèê", "AbC-123", "eee_AbC_123"),
+        ("", "Nim6yyD4QzI", "video_Nim6yyD4QzI"),
+        ("Title", "abc-def", "title_abc_def"),
+        ("word " * 40, "Nim6yyD4QzI", "word_word_word_word_word_word_word_word_Nim6yyD4QzI"),
+    )
+    return all(fetch_video.safe_video_stem(title, video_id) == expected
+               and len(fetch_video.safe_video_stem(title, video_id)) <= 60
+               and re.fullmatch(r"[A-Za-z0-9_]+", fetch_video.safe_video_stem(title, video_id))
+               for title, video_id, expected in examples)
 
 
 def check_subtitle_failure_is_best_effort() -> bool:
@@ -199,7 +217,7 @@ def check_subtitle_failure_is_best_effort() -> bool:
     option_sets: list[dict] = []
     info = {"_type": "video", "id": "short-id", "title": "Short", "language": "en",
             "webpage_url": "https://example.invalid/short"}
-    video = dest / "Short_short-id.mp4"
+    video = dest / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.mp4"
 
     class FakeYDL:
         def __init__(self, options: dict) -> None:
@@ -837,7 +855,17 @@ def check_build_bundle(video: Path) -> bool:
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     chapters = bundle["chapters"]
     frames = [frame for chapter in chapters for frame in chapter["frames"]]
+    bundle_text = (work / "bundle.json").read_text(encoding="utf-8")
+    path_values = [bundle["source"]["video"], bundle["speech"]["file"]]
+    path_values.extend(frame["file"] for frame in frames)
+    paths_resolve = all(value is None or not Path(value).is_absolute()
+                        and not re.match(r"^[A-Za-z]:", value)
+                        and (work / value).resolve().is_file()
+                        for value in path_values)
     return (chapters and chapters[0]["start"] == 0 and chapters[-1]["end"] >= 19.9
+            and bundle["schema_version"] == 2 and bundle["path_base"] == "analysis_folder"
+            and bundle["source"]["video"] == f"../{video.name}"
+            and not re.search(r"[A-Za-z]:[\\/]", bundle_text) and paths_resolve
             and bundle["source"]["duration"] >= 19.9
             and all(frame["pts"] is not None for frame in frames)
             and bundle["speech"]["source"] in {"whisper", "none"}
@@ -864,7 +892,16 @@ def check_bundle_without_fetch() -> bool:
     result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
                             capture_output=True, text=True, check=False)
     CHILD_OUTPUT.append(result.stdout + result.stderr)
-    return result.returncode == 0 and json.loads((work / "bundle.json").read_text(encoding="utf-8"))["speech"]["source"] == "none"
+    if result.returncode != 0:
+        return False
+    bundle_path = work / "bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["schema_version"] = 1
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    refusal = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
+                             capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.append(refusal.stdout + refusal.stderr)
+    return bundle["speech"]["source"] == "none" and refusal.returncode == 3
 
 
 def check_bundle_manual_subtitle() -> bool:
@@ -1015,6 +1052,8 @@ def main() -> int:
         checks["transcript files written"] = (work / "transcript.json").exists() and (work / "transcript.txt").exists()
     checks["build bundle writes JSON from extract outputs"] = run_check(
         "build bundle writes JSON from extract outputs", lambda: check_build_bundle(video))
+    checks["downloaded video names are short and safe"] = run_check(
+        "downloaded video names are short and safe", check_safe_video_stem)
     checks["bundle manifest resumes and conflicts safely"] = run_check(
         "bundle manifest resumes and conflicts safely", lambda: check_bundle_manifest_resume_conflict(video))
     try:

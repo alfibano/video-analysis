@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Bundle schema v2 stores source, speech, and frame paths relative to the `.analysis` folder.
+- Online video downloads use short ASCII filenames derived from the title and video ID.
 - OCR uses a bounded ONNX thread count and reports throttled progress.
 - Fetch reports bounded yt-dlp progress for terminal and redirected output.
 - Adaptive sampling keeps the base grid and frames around detected changes; --fixed-interval opts out.

@@ -89,7 +89,8 @@ After extraction, run `build_bundle.py "<video path>"` (add `--language fr` to s
 or `--skip-ocr` when OCR is unavailable). It reads only files in `.analysis` and writes `bundle.json`,
 which groups chapter speech, sampled frames with exact PTS, SponsorBlock overlap flags, and OCR text
 read from key frames. Sponsor speech and frames remain represented and carry `is_sponsor`;
-sponsored speech is excluded from `speech_text`. OCR is a text reading aid, not a visual
+sponsored speech is excluded from `speech_text`. Every path in `bundle.json` is relative to the
+`.analysis` folder. OCR is a text reading aid, not a visual
 description, and scans key frames only. Sampled frames can miss brief events, and an
 empty chapter may have no frame; the bundle does not choose a nearest frame.
 

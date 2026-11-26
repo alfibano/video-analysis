@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +17,23 @@ from tools import resolve_ffmpeg, resolve_js_runtime
 SPONSOR_CATEGORIES = ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview",
                       "music_offtopic", "filler"]
 SUBTITLE_SUFFIXES = {".vtt", ".srt", ".ass", ".lrc", ".json3", ".ttml"}
+
+
+def safe_video_stem(title: str, video_id: str) -> str:
+    """Create a short ASCII filename stem while preserving leading title words."""
+    safe_id = re.sub(r"[^A-Za-z0-9]", "_", str(video_id))
+    folded = unicodedata.normalize("NFKD", str(title)).encode("ascii", "ignore").decode("ascii")
+    title_part = re.sub(r"[^a-z0-9]+", "_", folded.lower()).strip("_")
+    if not title_part:
+        title_part = "video"
+    maximum = min(40, 60 - 1 - len(safe_id))
+    if len(title_part) > maximum:
+        prefix = title_part[:maximum]
+        boundary = prefix.rfind("_")
+        title_part = prefix[:boundary] if boundary > 0 else prefix
+    if not title_part:
+        title_part = "video"
+    return f"{title_part}_{safe_id}"
 
 
 class UnsupportedVideo(Exception):
@@ -81,7 +100,8 @@ def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
     options: dict[str, Any] = {
         "noplaylist": True,
         "restrictfilenames": True,
-        "outtmpl": str(dest / "%(title).120B_%(id)s.%(ext)s"),
+        "outtmpl": str(dest / (f"{safe_video_stem(str(info.get('title') or ''), str(info.get('id') or 'video'))}.%(ext)s"
+                               if info is not None else "%(id)s.%(ext)s")),
         "merge_output_format": "mp4",
         "subtitleslangs": languages,
         "quiet": True,
@@ -104,8 +124,9 @@ def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
     return options
 
 
-def build_subtitle_options(dest: Path, languages: list[str]) -> dict[str, Any]:
-    options = build_ydl_options(dest, sub_langs=languages)
+def build_subtitle_options(dest: Path, languages: list[str],
+                           info: dict[str, Any] | None = None) -> dict[str, Any]:
+    options = build_ydl_options(dest, info=info, sub_langs=languages)
     options.update({"skip_download": True, "writesubtitles": True,
                     "writeautomaticsub": True, "ignoreerrors": True})
     return options
@@ -229,7 +250,7 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         subtitle_info = {}
         subtitle_error = None
         try:
-            with factory(build_subtitle_options(args.dest.resolve(), languages)) as ydl:
+            with factory(build_subtitle_options(args.dest.resolve(), languages, preflight_info)) as ydl:
                 subtitle_info = download_video(args.url, ydl)
         except Exception as error:
             subtitle_error = " ".join(str(error).split())[:160] or type(error).__name__

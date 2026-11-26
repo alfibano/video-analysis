@@ -272,7 +272,8 @@ def _chapter_frames(chapter_index: int, frames: Sequence[FrameAssignment],
         if frame.chapter_index != chapter_index:
             continue
         sponsored = any(item.start <= frame.pts < item.end for item in sponsors)
-        item = {"file": frame.file, "pts": frame.pts, "is_key": frame.is_key,
+        frame_file = f"frames/{Path(frame.file.replace(chr(92), '/')).name}"
+        item = {"file": frame_file, "pts": frame.pts, "is_key": frame.is_key,
                 "is_sponsor": sponsored, "alignment": "in_range",
                 "ocr_text": ocr_texts.get(frame.file) if frame.is_key else None}
         if frame.file in ocr_skipped:
@@ -309,12 +310,19 @@ def build_bundle(metadata: Mapping[str, Any], chapters: Sequence[Chapter],
                  speech_language: str | None = None, speech_file: str | None = None,
                  ocr_texts: Mapping[str, str] | None = None,
                  ocr_skipped: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Build schema-version-1 bundle data from normalized pure inputs."""
+    """Build schema-version-2 bundle data with paths relative to the analysis folder."""
     chapters = list(chapters) or discover_chapters([], float(metadata.get("duration") or 0))
     source = speech_source or SpeechSource("none", speech_language, speech_file)
     output = [_assemble_chapter(i, len(chapters) - 1, chapter, speech_segments, frames,
                                 sponsors, ocr_texts or {}, ocr_skipped or {}) for i, chapter in enumerate(chapters)]
-    return {"schema_version": 1,
-            "source": {key: metadata.get(key) for key in ("title", "author", "channel", "url", "duration", "video")},
-            "speech": {"source": source.source, "language": source.language, "file": source.file},
+    bundle_source = {key: metadata.get(key) for key in ("title", "author", "channel", "url", "duration")}
+    video = metadata.get("video")
+    bundle_source["video"] = f"../{Path(str(video)).name}" if video else None
+    speech_file = source.file
+    if speech_file:
+        speech_path = Path(speech_file.replace(chr(92), "/"))
+        speech_file = speech_path.name if speech_path.is_absolute() else speech_path.as_posix()
+    return {"schema_version": 2, "path_base": "analysis_folder",
+            "source": bundle_source,
+            "speech": {"source": source.source, "language": source.language, "file": speech_file},
             "chapters": output}

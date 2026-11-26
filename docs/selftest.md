@@ -26,6 +26,8 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | changed parameters refused with exit 3 | a guard refuses to mix outputs made with other settings |
 | non-empty folder without manifest refused with exit 3 | a guard refuses to adopt a folder it did not create |
 | build bundle writes JSON from extract outputs | chapter coverage, frame PTS and transcript provenance make it into `bundle.json` |
+| bundle paths are relative to the analysis folder | source, speech and frame files resolve without absolute paths |
+| downloaded video names are short and safe | title and ID produce an ASCII stem no longer than 60 characters |
 | bundle works without fetch outputs | local extraction data is sufficient when fetch metadata and captions are absent |
 | bundle with fake fetch outputs prefers manual subtitles | manual language captions take priority over automatic captions |
 | bundle manifest resumes and conflicts safely | identical settings reuse output; changed settings exit 3 |
