@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -19,6 +20,7 @@ PACKAGES: dict[str, str] = {
     "yt_dlp": "yt-dlp[default]",
     "imageio_ffmpeg": "imageio-ffmpeg",
     "rapidocr": "rapidocr",
+    "openai": "openai",
 }
 
 
@@ -61,6 +63,7 @@ def report_tools(ffmpeg: Tool | None, ytdlp: Tool | None, js_runtime: Tool | Non
     else:
         ready = report_tool("JavaScript runtime", js_runtime) and ready
     ready = report_ocr() and ready
+    ready = report_correction() and ready
     return ready
 
 
@@ -103,6 +106,25 @@ def report_ocr() -> bool:
         except importlib.metadata.PackageNotFoundError:
             version = "unknown"
     print(f"OCR: rapidocr {version}")
+    return True
+
+
+def report_correction() -> bool:
+    """Report correction SDK availability and key presence without exposing the key."""
+    try:
+        module = importlib.import_module("openai")
+    except ImportError:
+        print("OpenAI: openai missing")
+        return False
+    version = getattr(module, "__version__", None)
+    if not version:
+        try:
+            version = importlib.metadata.version("openai")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+    print(f"OpenAI: openai {version}")
+    print("API key present" if os.environ.get("OPENAI_API_KEY")
+          else "API key missing; correction will be skipped")
     return True
 
 

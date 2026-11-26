@@ -348,10 +348,11 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
                     "params": {"fetch": fetch_params, "extract": extract_params},
                     "stages": manifest.get("stages", {})}
     recorded_source = manifest.get("source") or {}
-    if recorded_source.get("kind") not in {"local", "url"}:
+    source_kind = media_source_kind({"source": recorded_source,
+                                     "params": {"fetch": fetch_params}})
+    if recorded_source.get("kind") != source_kind:
         recorded_source = {**recorded_source,
-                           "kind": media_source_kind({"source": recorded_source,
-                                                      "params": {"fetch": fetch_params}})}
+                           "kind": source_kind}
     source_matches = same_video(recorded_source, identity)
     if fetch_only_unconfigured:
         extract_params = params

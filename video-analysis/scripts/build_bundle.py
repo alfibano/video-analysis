@@ -23,6 +23,9 @@ class SpeechRead:
     language: str | None
     file: str | None
     source: str
+    corrected_from: str | None = None
+    size: int = 0
+    mtime_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -227,7 +230,59 @@ def _read_speech(inputs: BundleInputs, language: str) -> SpeechRead:
                                   and isinstance(transcript.get("segments"), list),
                                   video_stem=str(inputs.metadata.get("video_stem") or ""))
     segments = read_speech_segments(source, inputs.work, transcript)
-    return SpeechRead(segments, source.language, source.file, source.source)
+    identity = _speech_identity(source, inputs.work)
+    corrected = _read_matching_correction(inputs, source, segments, identity)
+    if corrected is not None:
+        stat = (inputs.work / "transcript.corrected.json").stat()
+        return SpeechRead(corrected, source.language, "transcript.corrected.json", "corrected",
+                          source.source, stat.st_size, stat.st_mtime_ns)
+    return SpeechRead(segments, source.language, source.file, source.source, None,
+                      identity["size"], identity["mtime_ns"])
+
+
+def _speech_identity(source: SpeechSource, work: Path) -> dict[str, int]:
+    path = work / Path(source.file or "")
+    if not path.is_file():
+        return {"size": 0, "mtime_ns": 0}
+    stat = path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _read_matching_correction(inputs: BundleInputs, source: SpeechSource,
+                              originals: list[SpeechSegment], identity: dict[str, int]
+                              ) -> list[SpeechSegment] | None:
+    if source.source not in {"whisper", "automatic"}:
+        return None
+    params = inputs.manifest.get("params", {}).get("correct_transcript", {})
+    expected = {"kind": source.source, "language": source.language,
+                "file": Path(source.file or "").name, **identity}
+    if params.get("source") != expected:
+        return None
+    try:
+        value = json.loads((inputs.work / "transcript.corrected.json").read_text(encoding="utf-8"))
+        rows = value.get("segments")
+        endpoint = {"base_url_identity": params.get("base_url_identity"),
+                    "locality": params.get("locality")}
+        if (value.get("schema_version") != 1 or value.get("source") != {
+                key: expected[key] for key in ("kind", "language", "file")}
+                or value.get("model") != params.get("model")
+                or value.get("endpoint") != endpoint
+                or not isinstance(value.get("prompt_version"), str)
+                or not isinstance(rows, list) or len(rows) != len(originals)):
+            return None
+        corrected = []
+        allowed_statuses = {"corrected", "unchanged", "rejected_edit_ratio", "rejected_length_ratio",
+                            "fallback_refusal", "fallback_malformed", "fallback_provider_error"}
+        for row, original in zip(rows, originals):
+            if (not isinstance(row, dict) or row.get("start") != original.start
+                    or row.get("end") != original.end or row.get("original_text") != original.text
+                    or not isinstance(row.get("corrected_text"), str)
+                    or not row["corrected_text"].strip() or row.get("status") not in allowed_statuses):
+                return None
+            corrected.append(SpeechSegment(original.start, original.end, row["corrected_text"]))
+        return corrected
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def transient_key_frames(frames: dict[str, Any], keyframes: list[str],
@@ -250,7 +305,8 @@ def transient_key_frames(frames: dict[str, Any], keyframes: list[str],
     return skipped, window
 
 
-def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = None) -> dict[str, Any]:
+def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = None,
+                   speech: SpeechRead | None = None) -> dict[str, Any]:
     engine = "skipped" if args.skip_ocr else _ocr_version()
     if args.skip_ocr:
         ocr_threads = None
@@ -258,11 +314,16 @@ def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = No
         import os
         from ocr import default_ocr_threads
         ocr_threads = default_ocr_threads(os.cpu_count())
-    return {"language": args.language, "ocr_min_score": args.ocr_min_score,
+    params = {"language": args.language, "ocr_min_score": args.ocr_min_score,
             "min_chapter": args.min_chapter, "max_chapter": args.max_chapter,
             "target_chapter": args.target_chapter, "skip_ocr": args.skip_ocr,
             "ocr_engine": engine, "ocr_intra_op_threads": ocr_threads,
             "ocr_skip_transient_s": transient_key_frames({}, [], extract or {})[1]}
+    if speech is not None:
+        params["speech_input"] = {"source": speech.source, "corrected_from": speech.corrected_from,
+                                   "language": speech.language, "file": speech.file,
+                                   "size": speech.size, "mtime_ns": speech.mtime_ns}
+    return params
 
 
 def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
@@ -346,7 +407,8 @@ def write_outputs(inputs: BundleInputs, result: BundleResult,
     bundle = build_bundle(inputs.metadata, result.chapters, speech.segments,
                           result.assignments, inputs.sponsors,
                           speech_language=speech.language, speech_file=speech.file,
-                          speech_source=SpeechSource(speech.source, speech.language, speech.file),
+                          speech_source=SpeechSource(speech.source, speech.language, speech.file,
+                                                     speech.corrected_from),
                           ocr_texts=result.ocr_texts, ocr_skipped=result.ocr_skipped)
     _write_bundle(inputs, result, params, bundle)
     _report_bundle(inputs, result, speech.source)
@@ -379,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         inputs = _load_inputs(args.video)
         result = _prepare(inputs, args)
-        params = _bundle_params(args, inputs.manifest.get("params", {}).get("extract", {}))
+        params = _bundle_params(args, inputs.manifest.get("params", {}).get("extract", {}), result.speech)
         outcome = resume_outcome(inputs, params)
         if outcome is not None:
             return outcome

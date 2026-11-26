@@ -1,14 +1,14 @@
-"""Pure transcript-correction contracts used by the correction stage."""
+"""Safely correct selected transcript text and record a resumable analysis stage."""
 from __future__ import annotations
 
-import re
 import argparse
 import json
 import os
+import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import unicodedata
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -20,13 +20,6 @@ SYSTEM_PROMPT = (
     "Keep the speaker's wording, register and language. Do not rephrase, summarize, translate, add or remove content. "
     "Output exactly one line per input line, same numbers, format: <number><TAB><corrected text>. No other text."
 )
-
-
-@dataclass(frozen=True, slots=True)
-class SourceIdentity:
-    kind: str
-    language: str | None
-    file: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +53,66 @@ class CorrectedSegment:
     original_text: str
     corrected_text: str
     status: str
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionSettings:
+    model: str
+    base_url: str | None
+    locality: str
+    api_key: str | None
+    allow_remote_ai: bool
+    no_correct: bool
+    interactive: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionStage:
+    video: Path
+    work: Path
+    metadata: dict[str, Any]
+    source: Any
+    speech: Sequence[Any]
+    source_value: dict[str, Any]
+    params: dict[str, Any]
+    manifest: dict[str, Any]
+    stage: dict[str, Any]
+    previous: Any
+    output_path: Path
+
+
+def _load_correction_stage(video: Path, work: Path, language: str,
+                           settings: CorrectionSettings) -> tuple[CorrectionStage | None, int | None]:
+    from tools import media_source_kind, same_video
+    if not video.is_file() or not work.is_dir():
+        print("video or analysis folder is missing", file=sys.stderr)
+        return None, 2
+    metadata = _load_json(work / "metadata.json", {})
+    raw_info = _load_json(work / "raw_info.json", {})
+    transcript = _load_json(work / "transcript.json", {})
+    manifest = _load_json(work / "manifest.json", {"schema_version": 2, "params": {}, "stages": {}})
+    identity = {"path": str(video), "size": video.stat().st_size, "mtime_ns": video.stat().st_mtime_ns}
+    recorded_source = manifest.get("source") or {}
+    if recorded_source and not same_video(recorded_source, identity):
+        print("correction manifest conflict: video identity changed", file=sys.stderr)
+        return None, 3
+    source_kind = media_source_kind(manifest)
+    manifest["source"] = {**identity, "kind": source_kind}
+    source, speech = _source_data(video, work, transcript, raw_info, metadata, language)
+    source_file = Path(source.file).name if source.file else None
+    source_value = {"kind": source.source, "language": source.language, "file": source_file}
+    source_path = work / (source_file or "")
+    stat = source_path.stat() if source_path.is_file() else None
+    source_value.update(size=stat.st_size if stat else 0, mtime_ns=stat.st_mtime_ns if stat else 0)
+    params = {"model": settings.model, "base_url_identity": _base_url_identity(settings.base_url),
+              "locality": settings.locality, "prompt_version": PROMPT_VERSION,
+              "chunk_size": CHUNK_SIZE, "source": source_value}
+    params_root = manifest.setdefault("params", {})
+    stages = manifest.setdefault("stages", {})
+    state = CorrectionStage(video, work, metadata, source, speech, source_value, params, manifest,
+                            stages.get("correct_transcript") or {}, params_root.get("correct_transcript"),
+                            work / "transcript.corrected.json")
+    return state, None
 
 
 def build_context(title: str | None, description: str | None, language: str,
@@ -268,6 +321,109 @@ def _valid_output(path: Path, params: Mapping[str, Any], source: Any, segments: 
                     for row, item in zip(output["segments"], segments)))
 
 
+def _resolve_settings(model: str | None, base_url: str | None, locality: str | None,
+                     allow_remote_ai: bool, no_correct: bool, api_key: str | None,
+                     environ: Mapping[str, str], interactive: bool | None) -> CorrectionSettings:
+    model = model or environ.get("VIDEO_ANALYSIS_CORRECT_MODEL") or "gpt-6-luna"
+    base_url = base_url or environ.get("OPENAI_BASE_URL") or None
+    locality = locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
+    api_key = api_key if api_key is not None else environ.get("OPENAI_API_KEY")
+    if not api_key and locality == "local" and base_url:
+        api_key = "local-no-key"
+    return CorrectionSettings(model, base_url, locality, api_key, allow_remote_ai, no_correct, interactive)
+
+
+def _resume_decision(stage: Mapping[str, Any], previous: Any, params: Mapping[str, Any],
+                     output_path: Path, source: Any, speech: Sequence[Any]) -> int | None:
+    if stage.get("status") != "done":
+        return None
+    if previous != params or not _valid_output(output_path, params, source, speech):
+        print("correction manifest conflict: completed output or settings changed", file=sys.stderr)
+        return 3
+    print("CORRECTION: resumed")
+    return 0
+
+
+def _consent_decision(source_kind: str, locality: str, allow_remote_ai: bool,
+                      interactive: bool | None, stages: dict[str, Any], manifest: dict[str, Any],
+                      manifest_path: Path) -> tuple[dict[str, Any] | None, int | None]:
+    if not consent_required(source_kind, locality):
+        return None, None
+    if allow_remote_ai:
+        return {"granted": True, "method": "flag"}, None
+    can_prompt = sys.stdin.isatty() if interactive is None else interactive
+    accepted = (can_prompt and input(
+        "Send transcript text and video context to the configured remote AI? [y/N] ").strip().casefold() == "y")
+    if accepted:
+        return {"granted": True, "method": "interactive"}, None
+    stages["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
+    _write_manifest(manifest_path, manifest)
+    print("Remote AI consent is required for transcripts from local media; pass --allow-remote-ai.",
+          file=sys.stderr)
+    return None, 4
+
+
+def _correct_chunks(client: Any, model: str, context: str,
+                    speech: Sequence[Any]) -> tuple[list[CorrectedSegment], dict[str, int], int]:
+    chunks = chunk_segments([CorrectionInput(item.start, item.end, item.text) for item in speech])
+
+    def call_chunk(chunk: tuple[int, list[CorrectionInput]]) -> tuple[int, list[CorrectedSegment], TokenUsage]:
+        first_id, items = chunk
+        try:
+            response = client.correct(model=model, system_prompt=SYSTEM_PROMPT,
+                                      user_prompt=build_chunk_prompt(context, items, first_id))
+            outcome = _provider_result(response)
+        except Exception as error:  # Any provider failure must fall back to the original chunk.
+            print(f"correction provider failure: {type(error).__name__}", file=sys.stderr)
+            outcome = ProviderResult(None, error=True)
+        return first_id, correct_chunk(items, outcome, first_id=first_id), outcome.usage
+
+    results: dict[int, tuple[list[CorrectedSegment], TokenUsage]] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(call_chunk, chunk) for chunk in chunks]
+        for future in as_completed(futures):
+            first_id, rows, usage = future.result()
+            results[first_id] = (rows, usage)
+    corrected: list[CorrectedSegment] = []
+    totals = {key: 0 for key in ("input_tokens", "cached_input_tokens", "output_tokens",
+                                 "reasoning_tokens", "total_tokens")}
+    for first_id, _ in chunks:
+        rows, usage = results[first_id]
+        corrected.extend(rows)
+        for key in totals:
+            totals[key] += getattr(usage, key)
+    return corrected, totals, len(chunks)
+
+
+def _write_correction_result(state: CorrectionStage, settings: CorrectionSettings,
+                             consent: dict[str, Any] | None,
+                             rows: Sequence[CorrectedSegment], usage: dict[str, int],
+                             chunk_count: int) -> None:
+    output = {"schema_version": 1,
+              "source": {key: state.source_value[key] for key in ("kind", "language", "file")},
+              "model": settings.model,
+              "endpoint": {"base_url_identity": state.params["base_url_identity"],
+                           "locality": settings.locality},
+              "prompt_version": PROMPT_VERSION,
+              "segments": [{"start": item.start, "end": item.end, "original_text": item.original_text,
+                            "corrected_text": item.corrected_text, "status": item.status} for item in rows]}
+    state.output_path.write_text(json.dumps(output, ensure_ascii=False, indent=1), encoding="utf-8")
+    state.manifest.setdefault("params", {})["correct_transcript"] = state.params
+    counts: dict[str, int] = {}
+    for item in rows:
+        counts[item.status] = counts.get(item.status, 0) + 1
+    stage: dict[str, Any] = {"status": "done", "output": state.output_path.name,
+                             "chunks": chunk_count, "segments": len(rows),
+                             "segment_statuses": counts, "usage": usage}
+    if consent is not None:
+        stage["consent"] = consent
+    state.manifest["stages"]["correct_transcript"] = stage
+    _write_manifest(state.work / "manifest.json", state.manifest)
+    print(f"CORRECTION: complete | corrected {counts.get('corrected', 0)} | "
+          f"rejected {sum(v for k, v in counts.items() if k.startswith('rejected_'))} | "
+          f"fallback {sum(v for k, v in counts.items() if k.startswith('fallback_'))}")
+
+
 def run_correction(video: Path, *, language: str = "auto", model: str | None = None,
                    base_url: str | None = None, locality: str | None = None,
                    allow_remote_ai: bool = False, no_correct: bool = False,
@@ -275,122 +431,44 @@ def run_correction(video: Path, *, language: str = "auto", model: str | None = N
                    client_factory: Callable[..., Any] | None = None,
                    interactive: bool | None = None) -> int:
     """Select, authorize, run, and safely persist one correction stage."""
-    from bundle import SpeechSource
-    from tools import media_source_kind, same_video
     environ = os.environ if environ is None else environ
     video = video.resolve()
     work = video.parent / f"{video.stem}.analysis"
-    if not video.is_file() or not work.is_dir():
-        print("video or analysis folder is missing", file=sys.stderr)
-        return 2
-    model = model or environ.get("VIDEO_ANALYSIS_CORRECT_MODEL") or "gpt-6-luna"
-    base_url = base_url or environ.get("OPENAI_BASE_URL") or None
-    locality = locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
-    api_key = api_key if api_key is not None else environ.get("OPENAI_API_KEY")
-    if not api_key and locality == "local" and base_url:
-        api_key = "local-no-key"
-    metadata = _load_json(work / "metadata.json", {})
-    raw_info = _load_json(work / "raw_info.json", {})
-    transcript = _load_json(work / "transcript.json", {})
-    manifest = _load_json(work / "manifest.json", {"schema_version": 2, "params": {}, "stages": {}})
-    identity = {"path": str(video), "size": video.stat().st_size, "mtime_ns": video.stat().st_mtime_ns}
-    recorded_source = manifest.get("source") or {}
-    if recorded_source and not same_video(recorded_source, identity):
-        print("correction manifest conflict: video identity changed", file=sys.stderr)
-        return 3
-    source_kind = media_source_kind(manifest)
-    manifest["source"] = {**identity, "kind": source_kind}
-    source, speech = _source_data(video, work, transcript, raw_info, metadata, language)
-    source_file = Path(source.file).name if source.file else None
-    source_value = {"kind": source.source, "language": source.language, "file": source_file}
-    source_path = work / (source_file or "")
-    stat = source_path.stat() if source_path.is_file() else None
-    source_value.update(size=stat.st_size if stat else 0, mtime_ns=stat.st_mtime_ns if stat else 0)
-    params = {"model": model, "base_url_identity": _base_url_identity(base_url), "locality": locality,
-              "prompt_version": PROMPT_VERSION, "chunk_size": CHUNK_SIZE, "source": source_value}
-    params_root = manifest.setdefault("params", {})
-    stages = manifest.setdefault("stages", {})
-    stage = stages.get("correct_transcript") or {}
-    previous = params_root.get("correct_transcript")
-    output_path = work / "transcript.corrected.json"
-    if stage.get("status") == "done":
-        if previous != params or not _valid_output(output_path, params, source, speech):
-            print("correction manifest conflict: completed output or settings changed", file=sys.stderr)
-            return 3
-        print("CORRECTION: resumed")
-        return 0
-    skip = correction_skip_reason(no_correct=no_correct, source=source.source, api_key=api_key)
+    settings = _resolve_settings(model, base_url, locality, allow_remote_ai, no_correct,
+                                 api_key, environ, interactive)
+    state, load_error = _load_correction_stage(video, work, language, settings)
+    if state is None:
+        return load_error or 1
+    metadata, source, speech = state.metadata, state.source, state.speech
+    manifest, params = state.manifest, state.params
+    output_path = state.output_path
+    stage, previous = state.stage, state.previous
+    stages = manifest["stages"]
+    model, base_url, locality, api_key = (settings.model, settings.base_url,
+                                           settings.locality, settings.api_key)
+    resumed = _resume_decision(stage, previous, params, output_path, source, speech)
+    if resumed is not None:
+        return resumed
+    skip = correction_skip_reason(no_correct=settings.no_correct, source=source.source,
+                                  api_key=settings.api_key)
     if skip:
         stages["correct_transcript"] = {"status": "skipped", "reason": skip}
         _write_manifest(work / "manifest.json", manifest)
         print(f"CORRECTION: skipped | {skip}")
         return 0
-    if previous and previous != params and stage.get("status") == "done":
-        return 3
-    consent: dict[str, Any] | None = None
-    if consent_required(source_kind, locality):
-        if allow_remote_ai:
-            consent = {"granted": True, "method": "flag"}
-        else:
-            can_prompt = sys.stdin.isatty() if interactive is None else interactive
-            if can_prompt:
-                accepted = input("Send transcript text and video context to the configured remote AI? [y/N] ").strip().casefold() == "y"
-                if accepted:
-                    consent = {"granted": True, "method": "interactive"}
-            if consent is None:
-                stages["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
-                _write_manifest(work / "manifest.json", manifest)
-                print("Remote AI consent is required for transcripts from local media; pass --allow-remote-ai.", file=sys.stderr)
-                return 4
+    consent, consent_error = _consent_decision(manifest["source"]["kind"], settings.locality,
+                                               settings.allow_remote_ai,
+                                                settings.interactive, stages, manifest,
+                                                work / "manifest.json")
+    if consent_error is not None:
+        return consent_error
     factory = client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
     client = factory(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=2)
     language_value = source.language or "unknown"
     chapter_titles = [str(item.get("title") or "") for item in metadata.get("chapters", []) if isinstance(item, Mapping)]
     context = build_context(metadata.get("title"), metadata.get("description"), language_value, chapter_titles)
-    chunks = chunk_segments([CorrectionInput(item.start, item.end, item.text) for item in speech])
-    def call_chunk(chunk: tuple[int, list[CorrectionInput]]) -> tuple[int, list[CorrectedSegment], TokenUsage]:
-        first_id, items = chunk
-        try:
-            response = client.correct(model=model, system_prompt=SYSTEM_PROMPT,
-                                      user_prompt=build_chunk_prompt(context, items, first_id))
-            outcome = _provider_result(response)
-        except Exception:
-            outcome = ProviderResult(None, error=True)
-        return first_id, correct_chunk(items, outcome, first_id=first_id), outcome.usage
-    results: dict[int, tuple[list[CorrectedSegment], TokenUsage]] = {}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(call_chunk, chunk) for chunk in chunks]
-        for future in as_completed(futures):
-            first_id, corrected, usage = future.result()
-            results[first_id] = (corrected, usage)
-    corrected_rows: list[CorrectedSegment] = []
-    usage_totals = {key: 0 for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")}
-    for first_id, _ in chunks:
-        rows, usage = results[first_id]
-        corrected_rows.extend(rows)
-        for key in usage_totals:
-            usage_totals[key] += getattr(usage, key)
-    output = {"schema_version": 1, "source": {key: source_value[key] for key in ("kind", "language", "file")},
-              "model": model, "endpoint": {"base_url_identity": params["base_url_identity"], "locality": locality},
-              "prompt_version": PROMPT_VERSION,
-              "segments": [{"start": item.start, "end": item.end, "original_text": item.original_text,
-                            "corrected_text": item.corrected_text, "status": item.status}
-                           for item in corrected_rows]}
-    output_path.write_text(json.dumps(output, ensure_ascii=False, indent=1), encoding="utf-8")
-    params_root["correct_transcript"] = params
-    counts: dict[str, int] = {}
-    for item in corrected_rows:
-        counts[item.status] = counts.get(item.status, 0) + 1
-    stage_value: dict[str, Any] = {"status": "done", "output": output_path.name,
-                                   "chunks": len(chunks), "segments": len(corrected_rows),
-                                   "segment_statuses": counts, "usage": usage_totals}
-    if consent is not None:
-        stage_value["consent"] = consent
-    stages["correct_transcript"] = stage_value
-    _write_manifest(work / "manifest.json", manifest)
-    print(f"CORRECTION: complete | corrected {counts.get('corrected', 0)} | "
-          f"rejected {sum(v for k, v in counts.items() if k.startswith('rejected_'))} | "
-          f"fallback {sum(v for k, v in counts.items() if k.startswith('fallback_'))}")
+    corrected_rows, usage_totals, chunk_count = _correct_chunks(client, model, context, speech)
+    _write_correction_result(state, settings, consent, corrected_rows, usage_totals, chunk_count)
     return 0
 
 

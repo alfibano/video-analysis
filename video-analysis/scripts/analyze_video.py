@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from build_bundle import main as bundle_main
+from correct_transcript import main as correct_main
 from extract_video import main as extract_main
 from fetch_video import main as fetch_main
 
@@ -25,7 +26,7 @@ def _parser() -> argparse.ArgumentParser:
                      "It runs each script in process and stops at the first failed step."),
         epilog=("Example: python analyze_video.py lecture.mp4 --skip-transcript\n"
                 "Exit codes: 0 success; 1 processing failure; 2 invalid arguments or input;\n"
-                "3 unsupported URL or manifest conflict."))
+                "3 unsupported URL or manifest conflict; 4 remote-AI consent required."))
     parser.add_argument("source", help="local video path or one HTTP(S) video URL")
     parser.add_argument("--dest", type=Path, help="download folder for URL sources")
     parser.add_argument("--sub-langs", nargs="+", metavar="LANG",
@@ -33,6 +34,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=float, help="base frame interval in seconds")
     parser.add_argument("--dedup-threshold", type=float, help="key-frame difference threshold")
     parser.add_argument("--model", help="Whisper model name")
+    parser.add_argument("--correct-model", help="transcript correction model")
+    parser.add_argument("--base-url", help="OpenAI-compatible correction endpoint")
+    parser.add_argument("--ai-locality", choices=("local", "remote"), help="correction endpoint locality")
+    parser.add_argument("--allow-remote-ai", action="store_true", help="consent to remote correction of local media")
+    parser.add_argument("--no-correct", action="store_true", help="record an intentional correction skip")
     parser.add_argument("--language", help="transcript and caption language")
     parser.add_argument("--skip-frames", action="store_true", help="skip sampled frame extraction")
     parser.add_argument("--skip-transcript", action="store_true", help="skip Whisper transcription")
@@ -48,8 +54,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[str]]:
+def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[str], list[str]]:
     extract = [video]
+    correct = [video]
     bundle = [video]
     for name, option in (("interval", "--interval"), ("dedup_threshold", "--dedup-threshold"),
                          ("model", "--model"), ("language", "--language"),
@@ -59,6 +66,17 @@ def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[st
             extract.extend((option, str(value)))
     if args.language is not None:
         bundle.extend(("--language", args.language))
+        correct.extend(("--language", args.language))
+    if args.correct_model is not None:
+        correct.extend(("--model", args.correct_model))
+    if args.base_url is not None:
+        correct.extend(("--base-url", args.base_url))
+    if args.ai_locality is not None:
+        correct.extend(("--ai-locality", args.ai_locality))
+    if args.allow_remote_ai:
+        correct.append("--allow-remote-ai")
+    if args.no_correct:
+        correct.append("--no-correct")
     for name, option in (("skip_frames", "--skip-frames"), ("skip_transcript", "--skip-transcript"),
                          ("fixed_interval", "--fixed-interval")):
         if getattr(args, name):
@@ -74,7 +92,7 @@ def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[st
             bundle.extend((option, str(value)))
     if args.skip_ocr:
         bundle.append("--skip-ocr")
-    return extract, bundle
+    return extract, correct, bundle
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,9 +119,13 @@ def main(argv: list[str] | None = None) -> int:
         if not fetched:
             return 1
         video = str(fetched[0])
-    extract_args, bundle_args = _step_args(args, video)
+    extract_args, correct_args, bundle_args = _step_args(args, video)
     print("STEP extract", file=sys.stderr)
     code = extract_main(extract_args)
+    if code:
+        return code
+    print("STEP correct", file=sys.stderr)
+    code = correct_main(correct_args)
     if code:
         return code
     print("STEP bundle", file=sys.stderr)

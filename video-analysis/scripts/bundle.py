@@ -344,7 +344,8 @@ def build_bundle(metadata: Mapping[str, Any], chapters: Sequence[Chapter],
     if speech_file:
         speech_path = Path(speech_file.replace(chr(92), "/"))
         speech_file = speech_path.name if speech_path.is_absolute() else speech_path.as_posix()
+    speech = {"source": source.source, "language": source.language, "file": speech_file}
+    if source.corrected_from:
+        speech["corrected_from"] = source.corrected_from
     return {"schema_version": 2, "path_base": "analysis_folder",
-            "source": bundle_source,
-            "speech": {"source": source.source, "language": source.language, "file": speech_file},
-            "chapters": output}
+            "source": bundle_source, "speech": speech, "chapters": output}

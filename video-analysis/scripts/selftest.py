@@ -726,20 +726,79 @@ def check_setup_ocr_readiness() -> bool:
             and "OCR: rapidocr missing" in missing_output.getvalue())
 
 
+
+
+
+
+def check_bundle_corrected_speech_provenance() -> bool:
+    import build_bundle
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-corrected-")
+    transcript = {"language": "en", "segments": [{"start": 0, "end": 2, "text": "original"}]}
+    transcript_path = folder / "transcript.json"
+    transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+    stat = transcript_path.stat()
+    correction = {"schema_version": 1, "source": {"kind": "whisper", "language": "en", "file": "transcript.json"},
+                  "model": "test-model", "endpoint": {"base_url_identity": None, "locality": "local"},
+                  "prompt_version": "asr-correction-v1",
+                  "segments": [{"start": 0, "end": 2, "original_text": "original",
+                                "corrected_text": "corrected", "status": "corrected"}]}
+    (folder / "transcript.corrected.json").write_text(json.dumps(correction), encoding="utf-8")
+    inputs = SimpleNamespace(work=folder, transcript=transcript, raw_info={},
+                             metadata={"language": "en", "video_stem": "sample"},
+                             manifest={"params": {"correct_transcript": {"model": "test-model",
+                                 "base_url_identity": None, "locality": "local", "source": {
+                                 "kind": "whisper", "language": "en", "file": "transcript.json",
+                                 "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}}}})
+    speech = build_bundle._read_speech(inputs, "auto")
+    return speech.source == "corrected" and speech.file == "transcript.corrected.json" \
+        and speech.corrected_from == "whisper" and [item.text for item in speech.segments] == ["corrected"]
+
+
+def check_bundle_ignores_stale_corrected_speech() -> bool:
+    import build_bundle
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-stale-corrected-")
+    transcript = {"language": "en", "segments": [{"start": 0, "end": 1, "text": "original"}]}
+    path = folder / "transcript.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+    (folder / "transcript.corrected.json").write_text("{}", encoding="utf-8")
+    inputs = SimpleNamespace(work=folder, transcript=transcript, raw_info={},
+                             metadata={"language": "en", "video_stem": "sample"}, manifest={"params": {}})
+    speech = build_bundle._read_speech(inputs, "auto")
+    return speech.source == "whisper" and [item.text for item in speech.segments] == ["original"]
+
+
+def check_bundle_resume_keys_selected_speech_input() -> bool:
+    import build_bundle
+    args = SimpleNamespace(skip_ocr=True, language="auto", ocr_min_score=.5,
+                           min_chapter=30, max_chapter=600, target_chapter=300)
+    original = build_bundle._bundle_params(args, {}, speech=SimpleNamespace(
+        source="whisper", file="transcript.json", language="en", size=10, mtime_ns=20,
+        corrected_from=None))
+    changed = build_bundle._bundle_params(args, {}, speech=SimpleNamespace(
+        source="corrected", file="transcript.corrected.json", language="en", size=15,
+        mtime_ns=25, corrected_from="whisper"))
+    return original.get("speech_input") != changed.get("speech_input")
+
+
+
+
+
+
 def check_analyze_video_local_pipeline() -> bool:
     import analyze_video
     calls = []
-    with patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0), \
-            patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0), \
-            contextlib.redirect_stderr(io.StringIO()):
+    with (patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0),
+          patch.object(analyze_video, "correct_main", side_effect=lambda argv: calls.append(("correct", argv)) or 0),
+          patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0),
+          contextlib.redirect_stderr(io.StringIO())):
         code = analyze_video.main(["C:\\videos\\talk.mp4", "--skip-transcript", "--skip-ocr",
                                    "--language", "fr", "--interval", "3", "--at", "00:00:10"])
-    return (code == 0 and [call[0] for call in calls] == ["extract", "bundle"]
-            and calls[0][1][0] == "C:\\videos\\talk.mp4"
-            and "--skip-transcript" in calls[0][1] and "--skip-ocr" in calls[1][1]
-            and calls[0][1][calls[0][1].index("--language") + 1] == "fr"
-            and calls[1][1][calls[1][1].index("--language") + 1] == "fr"
-            and "--at" in calls[0][1] and "--interval" in calls[0][1])
+    return (code == 0 and [call[0] for call in calls] == ["extract", "correct", "bundle"]
+            and "--skip-transcript" in calls[0][1] and "--skip-ocr" in calls[2][1]
+            and all(calls[index][1][calls[index][1].index("--language") + 1] == "fr"
+                    for index in (0, 1, 2)))
 
 
 def check_analyze_video_url_pipeline() -> bool:
@@ -749,13 +808,32 @@ def check_analyze_video_url_pipeline() -> bool:
         calls.append(("fetch", argv))
         on_video(Path("downloaded.mp4"))
         return 0
-    with patch.object(analyze_video, "fetch_main", side_effect=fetch), \
-            patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0), \
+    with (patch.object(analyze_video, "fetch_main", side_effect=fetch),
+          patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0),
+          patch.object(analyze_video, "correct_main", side_effect=lambda argv: calls.append(("correct", argv)) or 0),
+          patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0),
+          contextlib.redirect_stderr(io.StringIO())):
+        code = analyze_video.main(["https://example.invalid/talk", "--dest", "downloads", "--sub-langs", "fr"])
+    return code == 0 and [call[0] for call in calls] == ["fetch", "extract", "correct", "bundle"]
+
+
+def check_analyze_video_correction_order_and_flags() -> bool:
+    import analyze_video
+    calls = []
+    with patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0), \
+            patch.object(analyze_video, "correct_main", side_effect=lambda argv: calls.append(("correct", argv)) or 0), \
             patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0), \
             contextlib.redirect_stderr(io.StringIO()):
-        code = analyze_video.main(["https://example.invalid/talk", "--dest", "downloads", "--sub-langs", "fr"])
-    return (code == 0 and [call[0] for call in calls] == ["fetch", "extract", "bundle"]
-            and calls[1][1][0] == "downloaded.mp4")
+        code = analyze_video.main(["talk.mp4", "--model", "whisper-small", "--correct-model", "fixer",
+                                   "--base-url", "http://localhost/v1", "--ai-locality", "local",
+                                   "--allow-remote-ai", "--no-correct", "--language", "de"])
+    names = [call[0] for call in calls]
+    correct_args = calls[names.index("correct")][1] if "correct" in names else []
+    return (code == 0 and names == ["extract", "correct", "bundle"]
+            and calls[0][1][calls[0][1].index("--model") + 1] == "whisper-small"
+            and "--model" in correct_args and correct_args[correct_args.index("--model") + 1] == "fixer"
+            and all(option in correct_args for option in ("--base-url", "--ai-locality", "--allow-remote-ai",
+                                                           "--no-correct", "--language")))
 
 
 def check_analyze_video_stops_on_failure() -> bool:
@@ -1244,9 +1322,13 @@ def check_correction_provider_errors_fall_back_per_chunk() -> bool:
     class ErrorClient:
         def correct(self, **kwargs: Any) -> Any:
             raise RuntimeError("provider unavailable")
-    result = run_correction(video, client_factory=lambda **kwargs: ErrorClient(), api_key="fake", locality="local")
+    error_output = io.StringIO()
+    with contextlib.redirect_stderr(error_output):
+        result = run_correction(video, client_factory=lambda **kwargs: ErrorClient(), api_key="fake", locality="local")
     output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
-    return result == 0 and output["segments"][0]["corrected_text"] == "original words" and output["segments"][0]["status"] == "fallback_provider_error"
+    return (result == 0 and output["segments"][0]["corrected_text"] == "original words"
+            and output["segments"][0]["status"] == "fallback_provider_error"
+            and error_output.getvalue().strip() == "correction provider failure: RuntimeError")
 
 
 def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
@@ -1298,6 +1380,27 @@ def _font_available(font_module: object, name: str) -> bool:
     except OSError:
         return False
     return True
+
+
+def check_setup_reports_correction_readiness_without_secrets() -> bool:
+    import setup_tools
+    fake = SimpleNamespace(__version__="1.2.3")
+    present_out, missing_out = io.StringIO(), io.StringIO()
+    with patch.dict(__import__("os").environ, {"OPENAI_API_KEY": "sentinel-secret"}), \
+            patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            contextlib.redirect_stdout(present_out):
+        present = setup_tools.report_correction()
+    with patch.dict(__import__("os").environ, {}, clear=True), \
+            patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            contextlib.redirect_stdout(missing_out):
+        missing = setup_tools.report_correction()
+    absent = setup_tools.missing_packages(module_lookup=lambda module: (_ for _ in ()).throw(ImportError())
+                                          if module == "openai" else object())
+    output = present_out.getvalue() + missing_out.getvalue()
+    return (present and missing and "OpenAI: openai 1.2.3" in output
+            and "API key present" in present_out.getvalue()
+            and "API key missing; correction will be skipped" in missing_out.getvalue()
+            and "sentinel-secret" not in output and "openai" in absent)
 
 
 def main() -> int:
@@ -1415,6 +1518,8 @@ def main() -> int:
             "sponsor spans remain flagged and summary text excludes them", check_bundle_sponsors)
         checks["OCR runs on key frames only"] = run_check("OCR runs on key frames only", check_ocr_key_frames)
         checks["OCR adapter is lazy"] = run_check("OCR adapter is lazy", check_ocr_is_lazy)
+        checks["setup reports correction readiness without secrets"] = run_check(
+            "setup reports correction readiness without secrets", check_setup_reports_correction_readiness_without_secrets)
         checks["OCR uses bounded ONNX threads and reports progress"] = run_check(
             "OCR uses bounded ONNX threads and reports progress", check_ocr_thread_tuning_and_progress)
         checks["OCR runtime thread count does not invalidate bundle resume"] = run_check(
@@ -1426,6 +1531,12 @@ def main() -> int:
             "bundle CLI handles SponsorBlock segments", check_bundle_cli_sponsorblock_segments)
         checks["bundle with fake fetch outputs prefers manual subtitles"] = run_check(
             "bundle with fake fetch outputs prefers manual subtitles", check_bundle_manual_subtitle)
+        checks["bundle uses matching corrected speech provenance"] = run_check(
+            "bundle uses matching corrected speech provenance", check_bundle_corrected_speech_provenance)
+        checks["bundle ignores stale corrected speech"] = run_check(
+            "bundle ignores stale corrected speech", check_bundle_ignores_stale_corrected_speech)
+        checks["bundle resume keys selected speech input"] = run_check(
+            "bundle resume keys selected speech input", check_bundle_resume_keys_selected_speech_input)
         checks["extract preserves bundle manifest params"] = run_check(
             "extract preserves bundle manifest params", check_extract_preserves_bundle_params)
         checks["manifest records local and URL source kinds"] = run_check(
@@ -1456,6 +1567,10 @@ def main() -> int:
             "correction provider errors fall back per chunk", check_correction_provider_errors_fall_back_per_chunk)
         checks["correction local endpoint runs without API key"] = run_check(
             "correction local endpoint runs without API key", check_local_endpoint_without_api_key_uses_placeholder)
+        checks["analyze_video correction order and flags"] = run_check(
+            "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
+        checks["analyze_video stops on failure"] = run_check(
+            "analyze_video stops on failure", check_analyze_video_stops_on_failure)
         real_ocr_ok, real_ocr_status = check_real_ocr_smoke()
         checks["real OCR smoke"] = real_ocr_ok
         CHECK_OUTPUTS["real OCR smoke"] = real_ocr_status
