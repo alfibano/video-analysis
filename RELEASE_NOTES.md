@@ -1,10 +1,10 @@
 # Release notes — video-analysis
 
-## v0.3.0 — 2026-11-26 — transcript correction
+## v0.3.0 — 2026-11-27 — transcript correction
 
 ### Added
-- Host-account correction providers: Claude Code Haiku and Codex Sol, selected before OpenAI in
-  `auto`; explicitly declared local SDK endpoints can omit the API key.
+- Host-account correction providers: Claude Code Haiku and Codex Luna, selected before OpenAI in
+  `auto` (refused chunks can be retried with Sonnet or Sol); explicitly declared local SDK endpoints can omit the API key.
 - Schema-v2 correction provenance, refused-chunk ordinals, attempt accounting, and selective
   `--retry-refused` escalation commands. Escalation is offered and never automatic.
 - `correct_transcript.py` corrects selected automatic-caption or Whisper speech in bounded chunks,
@@ -35,7 +35,13 @@
   default self-test makes zero provider calls.
 
 ### Measured
-- Self-test: default 74/74.
+- Self-test: default 75/75; `--full` 77/77.
+- Live, inside Claude Code (Haiku through the signed-in account), 8-min French video given as a
+  local file: without consent the pipeline stops with exit 4 before any call; with
+  `--allow-remote-ai` correction took about 20 s, changed 35 of 168 segments, refused none, and
+  lowered word error rate against human subtitles from 9.0 % to 7.2 %.
+- Live, local Qwen 3 4B through Ollama (`--provider local`): the SDK path works without a key;
+  one chunk timed out and kept its original text, which led to the longer local timeout.
 
 ## v0.2.1 — 2026-11-26 — SponsorBlock fix
 ### Fixed
