@@ -93,7 +93,7 @@ Analysis outputs stay in `<video>.analysis/` next to the video.
 
 ## Status
 
-v0.1.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
+v0.2.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License
 

@@ -1,6 +1,10 @@
 # Release notes — video-analysis
 
-## Unreleased
+## v0.2.0 — 2026-11-26 — online videos and reading bundle
+
+From one URL or local file, `analyze_video.py` downloads (when needed), extracts and writes a
+chapter-by-chapter `bundle.json`: speech, frames with exact timestamps, sponsor marks and text read
+on slides.
 
 - Bundle schema v2 stores source, speech, and frame paths relative to the `.analysis` folder.
 - Online video downloads use short ASCII filenames derived from the title and video ID.
@@ -42,6 +46,8 @@
 - OCR was about 28% faster with bounded ONNX threads.
 - Parallel OCR workers were rejected after no gain was measured.
 - Splitting extraction into parallel portions was rejected after gains of 30 s or less.
+- Release run (same talk, URL to bundle, subtitles instead of Whisper): 266 s end to end;
+  469 frames, 110 key frames of which 30 transient frames were not OCR'd; self-test 49/49, 51/51 with `--full`.
 
 ## v0.1.0 — 2026-11-14 — first release
 
