@@ -1,5 +1,15 @@
 # Release notes — video-analysis
 
+## v0.2.1 — 2026-11-26 — SponsorBlock fix
+### Fixed
+- `build_bundle.py` no longer crashes when `sponsorblock.json` lists segments: SponsorBlock spans are normalized before chapters are built. Before, any video with sponsor, intro or other SponsorBlock segments failed at `STEP bundle`.
+### Documentation
+- README describes the one-command workflow and the files each step writes.
+- Platform plan: transcript correction (step 3) uses a cheap online model; benchmark recorded.
+### Measured
+- A 20-min TED talk with three SponsorBlock spans, which crashed in v0.2.0, now bundles into
+  10 chapters with all three spans in `sponsor_overlap`; self-test 50/50, 52/52 with `--full`.
+
 ## v0.2.0 — 2026-11-26 — online videos and reading bundle
 
 From one URL or local file, `analyze_video.py` downloads (when needed), extracts and writes a
