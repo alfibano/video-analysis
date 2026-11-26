@@ -61,6 +61,11 @@ slower, did not fit in GPU memory and saturated RAM; an online model is needed a
 sheet (step 4). Part of the remaining WER is editorial: human subtitles drop fillers and lightly
 reword, which a correction must not reproduce.
 
+Correction now routes through the host's signed-in Claude Haiku or Codex Luna account when detected,
+with OpenAI as the outside-host path and an explicitly declared local endpoint as an option. Only
+refused chunks may be escalated to Sonnet or Codex `gpt-5.6-sol`; the user must run the offered
+command. Main Opus/Sol use remains reserved for the future study-sheet stage.
+
 ## Step 1 — acceptance criteria
 1. `fetch_video.py <url>` downloads one video (playlist and live refused; exit codes 0/1/2/3) and
    writes in `<video>.analysis/`: normalized `metadata.json` (title, author, channel, ISO upload

@@ -35,6 +35,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dedup-threshold", type=float, help="key-frame difference threshold")
     parser.add_argument("--model", help="Whisper model name")
     parser.add_argument("--correct-model", help="transcript correction model")
+    parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openai", "local"),
+                        help="transcript correction provider")
+    parser.add_argument("--retry-refused", action="store_true", help="retry refused correction chunks")
     parser.add_argument("--base-url", help="OpenAI-compatible correction endpoint")
     parser.add_argument("--ai-locality", choices=("local", "remote"), help="correction endpoint locality")
     parser.add_argument("--allow-remote-ai", action="store_true", help="consent to remote correction of local media")
@@ -69,6 +72,10 @@ def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[st
         correct.extend(("--language", args.language))
     if args.correct_model is not None:
         correct.extend(("--model", args.correct_model))
+    if args.provider is not None:
+        correct.extend(("--provider", args.provider))
+    if args.retry_refused:
+        correct.append("--retry-refused")
     if args.base_url is not None:
         correct.extend(("--base-url", args.base_url))
     if args.ai_locality is not None:

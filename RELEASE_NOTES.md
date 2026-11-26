@@ -3,6 +3,10 @@
 ## v0.3.0 — 2026-11-26 — transcript correction
 
 ### Added
+- Host-account correction providers: Claude Code Haiku and Codex Sol, selected before OpenAI in
+  `auto`; explicitly declared local SDK endpoints can omit the API key.
+- Schema-v2 correction provenance, refused-chunk ordinals, attempt accounting, and selective
+  `--retry-refused` escalation commands. Escalation is offered and never automatic.
 - `correct_transcript.py` corrects selected automatic-caption or Whisper speech in bounded chunks,
   records segment statuses and token usage, and preserves every original transcript and caption file.
 - `analyze_video.py` runs `fetch → extract → correct → bundle`; correction can use OpenAI or a
@@ -13,8 +17,12 @@
   provenance. Bundle resume detects a changed selected speech input.
 
 ### Changed
-- `setup_tools.py` installs and reports the OpenAI SDK and reports API-key presence without
-  printing the key. A missing key skips remote correction without failing setup.
+- Pipeline and setup expose provider readiness without printing credentials. Remote host correction
+  sends transcript text and title/description/language/chapter context only; schema-v1 corrections
+  are ignored and original speech remains the fallback.
+- `setup_tools.py` installs and reports the OpenAI SDK, host CLI readiness, and API-key presence
+  without printing the key. A missing key skips OpenAI correction without failing setup; host
+  providers use the authenticated host account.
 - For local media, remote correction sends transcript text, title, description, language, and chapter
   titles to the configured service. It does not send video, audio, frames, OCR text, or the key.
 - Migration: bundles built by v0.2.x are refused with exit 3 once correction changes the speech
@@ -27,7 +35,7 @@
   default self-test makes zero provider calls.
 
 ### Measured
-- Self-test: default 69/69; `--full` 71/71.
+- Self-test: default 74/74.
 
 ## v0.2.1 — 2026-11-26 — SponsorBlock fix
 ### Fixed

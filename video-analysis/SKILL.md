@@ -14,14 +14,33 @@ how to read them without overclaiming.
 **Privacy warning: transcript correction sends what is said in the video to an AI service outside
 your PC, unless you declare a local AI. Do not use it on confidential recordings without consent.**
 
-With an API key, transcript correction sends transcript text plus the video's title, description,
-language, and chapter titles to the configured AI service (OpenAI by default), a third party outside
-the PC. Correction does not send video, audio, frames, OCR text, or the API key. For local media,
+Transcript correction sends transcript text plus the video's title, description, language, and chapter
+titles to the selected remote AI service, a third party outside the PC. Correction does not send video,
+audio, frames, OCR text, or the API key. Auto prefers a detected Claude Code host, then a detected
+Codex host, then OpenAI when an API key is present. Host providers use the signed-in account and need
+no OpenAI key. For local media,
 ask the user before running correction with remote AI and pass `--allow-remote-ai` only after a yes.
 If the command exits 4, ask and rerun only after consent. Fetched public URLs are not asked. An
 explicitly declared local AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALITY=local`) with a
 base URL is not asked and needs no API key. Declaring local is a trust statement: a localhost proxy
-may still forward data online. Use `--no-correct` or no API key to keep correction fully offline.
+may still forward data online. Use `--no-correct` to keep correction fully offline.
+
+## Transcript correction providers
+
+Select `--provider auto|claude-code|codex|openai|local` (or
+`VIDEO_ANALYSIS_CORRECT_PROVIDER`). Auto prefers a detected Claude Code host, then a detected Codex
+host, then OpenAI when an API key exists. With no provider, correction records a skip. Claude Code
+uses the signed-in Haiku account; Codex defaults to the signed-in Luna account. These host providers need no
+OpenAI key. OpenAI and local compatible endpoints use the SDK. A local endpoint requires an explicit
+base URL and local trust declaration. Local media sent remotely requires interactive consent or
+`--allow-remote-ai`; EOF or noninteractive output denies consent with exit 4.
+
+Remote host correction sends transcript text and title, description, language, and chapter titles.
+It does not send video, audio, frames, OCR text, or API keys. Correction artifacts use schema 2 and
+include provider/model provenance for each segment. If chunks are refused, report their count and
+ordinals and offer the printed higher-model `--retry-refused` command; never run escalation
+automatically. Codex's higher retry model is `gpt-5.6-sol`. Codex may require network-enabled execution to reach its host service. Reserve main
+Opus/Sol use for the future study-sheet stage, except explicit refused-chunk escalation.
 
 ## Where things go — the owner's hard rule
 

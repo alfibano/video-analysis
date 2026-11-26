@@ -72,6 +72,11 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 | correction calls are bounded and usage is recorded | at most two requests run at once and token totals are recorded |
 | correction provider errors fall back per chunk | provider failures preserve originals and report the error type |
 | correction local endpoint runs without API key | declared local endpoint receives a fixed placeholder key |
+| correction provider selection matrix | CLI/environment/host/key precedence and defaults resolve offline |
+| correction CLI adapters are offline and account usage | fake runners assert commands, stdin, timeout, parsing, and normalized usage |
+| correction prose refusals are retryable | explicit refusal prose is retryable; valid numbered lines are not |
+| correction retry sends only refused chunks | retry configuration selects only recorded refused chunks |
+| correction consent EOF and noninteractive stdout exit 4 | EOF and redirected output deny without constructing a provider |
 | bundle uses matching corrected speech provenance | a matching correction is selected and provenance is recorded |
 | bundle ignores stale corrected speech | mismatched corrections fall back to original speech |
 | bundle resume keys selected speech input | changed corrected speech input conflicts with bundle resume |
@@ -83,6 +88,13 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 | *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
 
 The two refusal checks matter: a guard that has never been seen refusing proves nothing.
+
+## Correction provider checks
+
+Offline correction checks cover provider selection, Claude/Codex command arguments and usage parsing,
+prose refusal classification, refused-only retries, and consent EOF/noninteractive behavior. Fake
+subprocess runners assert stdin prompt delivery and prevent any real provider or CLI invocation.
+Setup and pipeline checks also cover readiness without secrets, provider flags, and documentation.
 
 ## When to run it
 

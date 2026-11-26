@@ -752,15 +752,17 @@ def check_bundle_corrected_speech_provenance() -> bool:
     transcript_path = folder / "transcript.json"
     transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
     stat = transcript_path.stat()
-    correction = {"schema_version": 1, "source": {"kind": "whisper", "language": "en", "file": "transcript.json"},
+    correction = {"schema_version": 2, "source": {"kind": "whisper", "language": "en", "file": "transcript.json"},
+                  "provider": "openai",
                   "model": "test-model", "endpoint": {"base_url_identity": None, "locality": "local"},
                   "prompt_version": "asr-correction-v1",
                   "segments": [{"start": 0, "end": 2, "original_text": "original",
-                                "corrected_text": "corrected", "status": "corrected"}]}
+                                "corrected_text": "corrected", "status": "corrected",
+                                "provider": "openai", "model": "test-model"}]}
     (folder / "transcript.corrected.json").write_text(json.dumps(correction), encoding="utf-8")
     inputs = SimpleNamespace(work=folder, transcript=transcript, raw_info={},
                              metadata={"language": "en", "video_stem": "sample"},
-                             manifest={"params": {"correct_transcript": {"model": "test-model",
+                             manifest={"params": {"correct_transcript": {"provider": "openai", "model": "test-model",
                                  "base_url_identity": None, "locality": "local", "source": {
                                  "kind": "whisper", "language": "en", "file": "transcript.json",
                                  "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}}}})
@@ -840,14 +842,16 @@ def check_analyze_video_correction_order_and_flags() -> bool:
             contextlib.redirect_stderr(io.StringIO()):
         code = analyze_video.main(["talk.mp4", "--model", "whisper-small", "--correct-model", "fixer",
                                    "--base-url", "http://localhost/v1", "--ai-locality", "local",
-                                   "--allow-remote-ai", "--no-correct", "--language", "de"])
+                                   "--allow-remote-ai", "--no-correct", "--provider", "codex",
+                                   "--retry-refused", "--language", "de"])
     names = [call[0] for call in calls]
     correct_args = calls[names.index("correct")][1] if "correct" in names else []
     return (code == 0 and names == ["extract", "correct", "bundle"]
             and calls[0][1][calls[0][1].index("--model") + 1] == "whisper-small"
             and "--model" in correct_args and correct_args[correct_args.index("--model") + 1] == "fixer"
             and all(option in correct_args for option in ("--base-url", "--ai-locality", "--allow-remote-ai",
-                                                           "--no-correct", "--language")))
+                                                           "--no-correct", "--language", "--provider",
+                                                           "--retry-refused")))
 
 
 def check_analyze_video_stops_on_failure() -> bool:
@@ -1178,11 +1182,15 @@ def check_correction_consent_matrix() -> bool:
 
 def call_correction(video: Path, **options: Any) -> int:
     from correct_transcript import CorrectionDeps, CorrectionRequest, run_correction
+    if options.get("client_factory") is not None and "provider" not in options:
+        options["provider"] = "openai"
     request_fields = {"language", "model", "base_url", "locality", "allow_remote_ai",
-                      "no_correct", "api_key"}
+                      "no_correct", "api_key", "provider", "retry_refused"}
     request = CorrectionRequest(**{key: options.pop(key) for key in list(options) if key in request_fields})
     deps = CorrectionDeps(options.pop("environ", __import__("os").environ),
-                          options.pop("client_factory", None), options.pop("interactive", None))
+                          options.pop("client_factory", None), options.pop("interactive", None),
+                          options.pop("which", __import__("shutil").which),
+                          options.pop("subprocess_runner", subprocess.run))
     if options:
         raise TypeError(f"unknown correction test options: {', '.join(options)}")
     return run_correction(video, request, deps)
@@ -1233,9 +1241,10 @@ def check_correction_skip_modes_stay_offline() -> bool:
     disabled = call_correction(video, client_factory=NeverClient(), no_correct=True)
     (folder / "skip.analysis" / "transcript.json").write_text(json.dumps({"language": "en",
         "segments": [{"start": 0, "end": 1, "text": "offline"}]}), encoding="utf-8")
-    missing_key = call_correction(video, client_factory=NeverClient(), environ={}, locality="remote")
+    missing_key = call_correction(video, client_factory=NeverClient(), provider="auto",
+                                  environ={}, locality="remote")
     stage = json.loads((folder / "skip.analysis" / "manifest.json").read_text(encoding="utf-8"))["stages"]["correct_transcript"]
-    return disabled == 0 and missing_key == 0 and stage.get("reason") == "no API key"
+    return disabled == 0 and missing_key == 0 and stage.get("reason") == "no available correction provider"
 
 
 def check_manual_subtitles_skip_correction_unchanged() -> bool:
@@ -1293,7 +1302,7 @@ def check_correction_fake_client_writes_validated_output() -> bool:
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     usage = manifest["stages"]["correct_transcript"]["usage"]
     return (result == 0 and output["segments"][0]["corrected_text"] == "Bonjour, monde."
-            and output["schema_version"] == 1 and usage["cached_input_tokens"] == 2
+            and output["schema_version"] == 2 and usage["cached_input_tokens"] == 2
             and usage["reasoning_tokens"] == 1)
 
 
@@ -1365,10 +1374,144 @@ def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
     def factory(**kwargs: Any) -> FakeClient:
         observed.update(kwargs)
         return FakeClient()
-    result = call_correction(video, client_factory=factory, locality="local", base_url="http://127.0.0.1/v1",
+    result = call_correction(video, client_factory=factory, locality="local", provider="local",
+                            base_url="http://127.0.0.1/v1",
                             environ={"VIDEO_ANALYSIS_AI_LOCALITY": "local"})
     output = (work / "manifest.json").read_text(encoding="utf-8")
-    return result == 0 and observed.get("api_key") == "local-no-key" and "local-no-key" not in output
+    return (result == 0 and observed.get("api_key") == "local-no-key"
+            and observed.get("timeout") == 900 and observed.get("max_retries") == 2
+            and "local-no-key" not in output)
+
+
+def check_provider_selection_matrix() -> bool:
+    import correct_transcript as correction
+    def which(name: str) -> str | None:
+        return {"claude": "claude-bin", "codex.cmd": "codex-shim"}.get(name)
+    matrix = [
+        correction.resolve_provider({"CLAUDECODE": "1", "CODEX_THREAD_ID": "x"}, which=which)
+        == ("claude-code", "claude-bin"),
+        correction.resolve_provider({"CODEX_SESSION_ID": "x"}, which=which) == ("codex", "codex-shim"),
+        correction.resolve_provider({"OPENAI_API_KEY": "secret"}, which=which) == ("openai", None),
+        correction.resolve_provider({}, which=which) == (None, None),
+        correction.resolve_provider({"OPENAI_API_KEY": "x"}, "local", which) == ("local", None),
+        correction.provider_default_model("codex") == "gpt-6-luna",
+    ]
+    return all(matrix)
+
+
+def check_cli_adapters_are_offline_and_account_usage() -> bool:
+    import correct_transcript as correction
+    calls = []
+    claude_json = json.dumps({"result": "1\tbonjour", "usage": {"input_tokens": 3,
+        "cache_creation_input_tokens": 2, "cache_read_input_tokens": 1, "output_tokens": 4},
+        "total_cost_usd": .01})
+    codex_jsonl = "\n".join([json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "1\thello"}}),
+                               json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5,
+                                   "cached_input_tokens": 2, "output_tokens": 3, "reasoning_output_tokens": 4}})])
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        result = claude_json if command[0] == "claude-bin" else codex_jsonl
+        return SimpleNamespace(returncode=0, stdout=result, stderr="")
+    claude = correction.ClaudeCodeClient(executable="claude-bin", runner=runner).correct(
+        model="haiku", system_prompt="system secret", user_prompt="transcript secret")
+    codex = correction.CodexClient(executable="codex-shim", runner=runner).correct(
+        model="sol", system_prompt="system secret", user_prompt="transcript secret")
+    a, b = calls
+    return (claude.text == "1\tbonjour" and claude.usage.input_tokens == 6
+            and claude.usage.cached_input_tokens == 1 and claude.reported_cost_usd == .01
+            and codex.usage.reasoning_tokens == 4 and codex.usage.total_tokens == 12
+            and codex.text == "1\thello"
+            and a[0] == ["claude-bin", "-p", "--model", "haiku", "--output-format", "json",
+                         "--system-prompt", "system secret", "--tools", "", "--strict-mcp-config",
+                         "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "project"]
+            and b[0][-1] == "-" and b[1]["shell"] is False and b[1]["timeout"] == 900
+            and "transcript secret" not in " ".join(a[0] + b[0])
+            and all("transcript secret" in call[1]["input"] for call in calls))
+
+
+def check_prose_refusals_are_retryable() -> bool:
+    import correct_transcript as correction
+    return (correction.is_prose_refusal("I cannot provide that transcript", [1])
+            and correction.is_prose_refusal("Copyright policy: I must refuse", [1])
+            and not correction.is_prose_refusal("1\tI cannot attend", [1])
+            and not correction.is_prose_refusal("Please review the copyright policy", [1]))
+
+
+def check_retry_sends_only_refused_chunks() -> bool:
+    import correct_transcript as correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-retry-refused-")
+    video = folder / "sample.mp4"
+    video.write_bytes(b"video")
+    work = folder / "sample.analysis"
+    work.mkdir()
+    segments = [{"start": index, "end": index + 1, "text": f"spoken words {index}"}
+                for index in range(41)]
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": segments}),
+                                          encoding="utf-8")
+    prompts = []
+    def runner(command, **kwargs):
+        prompt = kwargs["input"]
+        prompts.append((command[command.index("--model") + 1], prompt))
+        ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", prompt)]
+        if prompts[-1][0] == "claude-haiku-5-5" and ids[0] == 1:
+            answer = "I cannot provide a correction for this chunk."
+        else:
+            answer = "\n".join(f"{number}\tspoken words {number - 1}" for number in ids)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"result": answer, "usage": {
+            "input_tokens": 1, "output_tokens": 1}}), stderr="")
+    env = {"CLAUDECODE": "1"}
+    deps = {"environ": env, "which": lambda command: "claude.exe" if command == "claude" else None,
+            "subprocess_runner": runner}
+    initial_output = io.StringIO()
+    with contextlib.redirect_stdout(initial_output):
+        initial = call_correction(video, provider="claude-code", locality="local", **deps)
+    retry = call_correction(video, provider="claude-code", locality="local", model="claude-sonnet-5-5",
+                             retry_refused=True, **deps)
+    output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    stage = manifest["stages"]["correct_transcript"]
+    retry_prompt = prompts[-1][1] if prompts else ""
+    retry_ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", retry_prompt)]
+    command_output = initial_output.getvalue()
+    return (initial == retry == 0 and len(prompts) == 3 and retry_ids == list(range(1, 41))
+            and "--provider claude-code" in command_output and "--retry-refused" in command_output
+            and "--model claude-sonnet-5-5" in command_output and "--ai-locality local" in command_output
+            and sys.executable in command_output and str(video) in command_output
+            and stage["refused_chunks"] == [] and len(stage["attempts"]) == 2
+            and output["segments"][40]["model"] == "claude-haiku-5-5"
+            and all(row["model"] == "claude-sonnet-5-5" for row in output["segments"][:40]))
+
+
+def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
+    import correct_transcript as correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-consent-eof-")
+    video = folder / "local.mp4"
+    video.write_bytes(b"video")
+    work = folder / "local.analysis"
+    work.mkdir()
+    (work / "manifest.json").write_text(json.dumps({"schema_version": 2, "source": {
+        "kind": "local", "path": str(video.resolve()), "size": video.stat().st_size,
+        "mtime_ns": video.stat().st_mtime_ns}, "params": {}, "stages": {}}), encoding="utf-8")
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 0, "end": 1, "text": "hello there"}]}), encoding="utf-8")
+    args = {"provider": "openai", "api_key": "fake", "locality": "remote",
+            "environ": {"OPENAI_API_KEY": "fake"},
+            "client_factory": lambda **_: (_ for _ in ()).throw(AssertionError("constructed before consent"))}
+    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True), \
+            patch("builtins.input", side_effect=EOFError), contextlib.redirect_stderr(io.StringIO()):
+        eof = call_correction(video, **args)
+    with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=False), \
+            contextlib.redirect_stderr(io.StringIO()):
+        noninteractive = call_correction(video, **args)
+    return eof == 4 and noninteractive == 4
+
+
+def check_documentation_contract_current() -> bool:
+    readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
+    skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
+    return all(term in readme + skill for term in ("claude-code", "codex", "--retry-refused", "schema 2"))
 
 
 def check_real_ocr_smoke() -> tuple[bool, str]:
@@ -1403,22 +1546,51 @@ def _font_available(font_module: object, name: str) -> bool:
 def check_setup_reports_correction_readiness_without_secrets() -> bool:
     import setup_tools
     fake = SimpleNamespace(__version__="1.2.3")
-    present_out, missing_out = io.StringIO(), io.StringIO()
-    with patch.dict(__import__("os").environ, {"OPENAI_API_KEY": "sentinel-secret"}), \
+    present_out, missing_out, host_out, codex_out, local_out = (io.StringIO(), io.StringIO(), io.StringIO(),
+                                                                io.StringIO(), io.StringIO())
+    with patch.dict(__import__("os").environ, {"OPENAI_API_KEY": "sentinel-secret"}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            patch.object(setup_tools.shutil, "which", return_value=None), \
             contextlib.redirect_stdout(present_out):
         present = setup_tools.report_correction()
     with patch.dict(__import__("os").environ, {}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            patch.object(setup_tools.shutil, "which", return_value=None), \
             contextlib.redirect_stdout(missing_out):
         missing = setup_tools.report_correction()
+    with patch.dict(__import__("os").environ, {"CLAUDECODE": "1"}, clear=True), \
+            patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            patch.object(setup_tools.shutil, "which", side_effect=lambda name: "claude.exe" if name == "claude" else None), \
+            contextlib.redirect_stdout(host_out):
+        claude = setup_tools.report_correction()
+    with patch.dict(__import__("os").environ, {"CODEX_SESSION_ID": "x"}, clear=True), \
+            patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            patch.object(setup_tools.shutil, "which", side_effect=lambda name: "codex.cmd" if name == "codex" else None), \
+            contextlib.redirect_stdout(codex_out):
+        codex = setup_tools.report_correction()
+    with patch.dict(__import__("os").environ, {"VIDEO_ANALYSIS_CORRECT_PROVIDER": "local",
+            "OPENAI_BASE_URL": "http://127.0.0.1/v1", "VIDEO_ANALYSIS_AI_LOCALITY": "local"}, clear=True), \
+            patch.object(setup_tools.importlib, "import_module", return_value=fake), \
+            patch.object(setup_tools.shutil, "which", return_value=None), \
+            contextlib.redirect_stdout(local_out):
+        local = setup_tools.report_correction()
     absent = setup_tools.missing_packages(module_lookup=lambda module: (_ for _ in ()).throw(ImportError())
                                           if module == "openai" else object())
     output = present_out.getvalue() + missing_out.getvalue()
-    return (present and missing and "OpenAI: openai 1.2.3" in output
+    readiness = output + host_out.getvalue() + codex_out.getvalue() + local_out.getvalue()
+    conditions = [present, missing, claude, codex, local, "OpenAI: openai 1.2.3" in output
             and "API key present" in present_out.getvalue()
-            and "API key missing; correction will be skipped" in missing_out.getvalue()
-            and "sentinel-secret" not in output and "openai" in absent)
+            and "Correction auto provider: openai" in present_out.getvalue()
+            and "Correction auto provider: none" in missing_out.getvalue()
+            and "API key missing" in missing_out.getvalue()
+            and "Claude Code: claude.exe" in host_out.getvalue()
+            and "Correction auto provider: claude-code" in host_out.getvalue()
+            and "Codex: codex.cmd" in codex_out.getvalue()
+            and "Correction auto provider: codex" in codex_out.getvalue()
+            and "Correction auto provider: local" in local_out.getvalue()
+            and "Host providers use the host's authenticated account" in readiness
+            and "sentinel-secret" not in readiness and "openai" in absent]
+    return all(conditions)
 
 
 def main() -> int:
@@ -1585,6 +1757,18 @@ def main() -> int:
             "correction provider errors fall back per chunk", check_correction_provider_errors_fall_back_per_chunk)
         checks["correction local endpoint runs without API key"] = run_check(
             "correction local endpoint runs without API key", check_local_endpoint_without_api_key_uses_placeholder)
+        checks["correction provider selection matrix"] = run_check(
+            "correction provider selection matrix", check_provider_selection_matrix)
+        checks["correction CLI adapters are offline and account usage"] = run_check(
+            "correction CLI adapters are offline and account usage", check_cli_adapters_are_offline_and_account_usage)
+        checks["correction prose refusals are retryable"] = run_check(
+            "correction prose refusals are retryable", check_prose_refusals_are_retryable)
+        checks["correction retry sends only refused chunks"] = run_check(
+            "correction retry sends only refused chunks", check_retry_sends_only_refused_chunks)
+        checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
+            "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
+        checks["documentation contract current"] = run_check(
+            "documentation contract current", check_documentation_contract_current)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(

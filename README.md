@@ -1,5 +1,31 @@
 # video-analysis
 
+## Transcript correction providers
+
+Correction selects `--provider auto|claude-code|codex|openai|local` (or
+`VIDEO_ANALYSIS_CORRECT_PROVIDER`) in this order: a Claude Code host marker, a Codex host marker,
+then `OPENAI_API_KEY`. If no provider is available, correction records a skip and exits 0. Claude
+Code uses the signed-in Haiku account (`claude-haiku-5-5`); Codex uses the signed-in Luna account
+(`gpt-6-luna`). OpenAI and explicitly selected local endpoints also default to `gpt-6-luna`. Use
+`--model` or `VIDEO_ANALYSIS_CORRECT_MODEL` to override; the pipeline exposes `--correct-model`.
+
+Provider identity does not imply endpoint locality, and `auto` does not infer a local provider from
+a base URL. Local endpoints require `--provider local`, a
+base URL, and `--ai-locality local` (or `VIDEO_ANALYSIS_AI_LOCALITY=local`). Local media sent to a
+remote endpoint requires `--allow-remote-ai` or interactive consent. Remote host correction sends
+transcript text plus title, description, language, and chapter titles; it does not send video, audio,
+frames, OCR text, or API keys. Claude and Codex use the host account; OpenAI and local endpoints use
+the SDK path. A local SDK endpoint can omit the API key.
+
+Correction artifacts use schema 2 and record provider/model provenance per segment. Schema-v1,
+stale, or malformed correction output is ignored in favor of original speech. Refused chunks
+are retained and listed in the manifest. Use the printed `--retry-refused --model ...` command to
+retry only those chunks; escalation is never automatic. Claude defaults to `claude-haiku-5-5` and
+escalates to `claude-sonnet-5-5`; Codex defaults to `gpt-6-luna` and escalates to `gpt-5.6-sol`.
+Codex may need network-enabled execution to reach its host service. Exit 1 means processing failed;
+exit 2 means invalid configuration or input; exit 3 means completed state or output conflicts; exit 4
+means consent is required.
+
 A [Claude Code](https://claude.com/claude-code) skill that lets an agent **read a local video**:
 what is **seen** (sampled frames, timestamped contact sheets, screen changes, exact-time frames) and
 what is **said** (offline timestamped transcript), with a procedure to report both cross-referenced
@@ -108,15 +134,17 @@ downloads one public video. Progress is bounded.
 
 ### `STEP correct` — transcript correction (optional AI service)
 
-When `OPENAI_API_KEY` is set, the selected automatic captions or Whisper transcript can be corrected
-in bounded chunks. The original transcript and caption files are never changed. `--no-correct`
-records a skip; without a key correction is skipped. See [Confidentiality](#confidentiality) for
-what leaves the PC and local-video consent.
+When an automatic provider is available, selected automatic captions or Whisper transcript can be
+corrected in bounded chunks. Auto uses the detected Claude Code or Codex host account, then OpenAI
+when `OPENAI_API_KEY` is set; `--provider local` selects a declared local endpoint. The original
+transcript and caption files are never changed. `--no-correct` records a skip; when no provider is
+available correction is skipped. See [Transcript correction providers](#transcript-correction-providers)
+for flags, escalation, and [Confidentiality](#confidentiality) for data sent and local-video consent.
 
 | Output | Content |
 |---|---|
-| `transcript.corrected.json` | Corrected text beside each original segment, with source, model, endpoint locality, and per-segment status. Manual subtitles retain precedence and are not corrected. |
-| `manifest.json` | Correction parameters and stage status, consent method when needed, segment status counts, and token usage. |
+| `transcript.corrected.json` | Schema 2 corrected text beside each original segment, with source, provider/model provenance, endpoint locality, and per-segment status. Manual subtitles retain precedence and are not corrected. |
+| `manifest.json` | Correction parameters and stage status, consent method when needed, status counts, usage/cost, attempts, and refused chunk ordinals. |
 
 ### `STEP bundle` — the reading summary (offline)
 
@@ -139,8 +167,8 @@ Read `bundle.json` first when present.
 Running the same command again resumes: finished stages are skipped. Changed settings or a
 different video are refused (exit 3) instead of mixing outputs; exit 1 is a processing failure,
 exit 2 bad input, and exit 4 means local-video consent for remote AI is required. Options include
-`--correct-model` (separate from Whisper's `--model`), `--base-url`, `--ai-locality local|remote`,
-`--allow-remote-ai` (use only after consent), and `--no-correct`. Correction also reads
+`--provider`, `--correct-model` (separate from Whisper's `--model`), `--retry-refused`, `--base-url`,
+`--ai-locality local|remote`, `--allow-remote-ai` (use only after consent), and `--no-correct`. Correction also reads
 `VIDEO_ANALYSIS_CORRECT_MODEL`, `OPENAI_BASE_URL`, and `VIDEO_ANALYSIS_AI_LOCALITY`. Each step also
 exists as its own script — `fetch_video.py`, `extract_video.py`, `correct_transcript.py`,
 `build_bundle.py` — to rerun one step alone, for example

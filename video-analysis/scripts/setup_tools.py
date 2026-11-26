@@ -7,6 +7,7 @@ import importlib.metadata
 import os
 import subprocess
 import sys
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -110,12 +111,35 @@ def report_ocr() -> bool:
 
 
 def report_correction() -> bool:
-    """Report correction SDK availability and key presence without exposing the key."""
+    """Report host, OpenAI, and declared-local correction readiness without secrets."""
+    claude = shutil.which("claude")
+    codex = shutil.which("codex") or shutil.which("codex.cmd")
+    print(f"Claude Code: {claude or 'missing'}")
+    print(f"Codex: {codex or 'missing'}")
+    print("Host providers use the host's authenticated account")
+    env = os.environ
+    if "CLAUDECODE" in env:
+        selected = "claude-code" if claude else None
+        if not claude:
+            print("Claude Code host detected but its executable is missing")
+    elif "CODEX_THREAD_ID" in env or "CODEX_SESSION_ID" in env:
+        selected = "codex" if codex else None
+        if not codex:
+            print("Codex host detected but its executable is missing")
+    elif env.get("OPENAI_API_KEY"):
+        selected = "openai"
+    elif env.get("VIDEO_ANALYSIS_CORRECT_PROVIDER") == "local" and env.get("OPENAI_BASE_URL") and env.get("VIDEO_ANALYSIS_AI_LOCALITY") == "local":
+        selected = "local"
+    else:
+        selected = None
+    print(f"Correction auto provider: {selected or 'none'}")
+    if selected is None:
+        print("No available automatic provider; correction will be skipped")
     try:
         module = importlib.import_module("openai")
     except ImportError:
         print("OpenAI: openai missing")
-        return False
+        return selected in {None, "claude-code", "codex"}
     version = getattr(module, "__version__", None)
     if not version:
         try:
@@ -123,8 +147,7 @@ def report_correction() -> bool:
         except importlib.metadata.PackageNotFoundError:
             version = "unknown"
     print(f"OpenAI: openai {version}")
-    print("API key present" if os.environ.get("OPENAI_API_KEY")
-          else "API key missing; correction will be skipped")
+    print("API key present" if env.get("OPENAI_API_KEY") else "API key missing")
     return True
 
 
