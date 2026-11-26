@@ -28,18 +28,38 @@ smart" work; the chief model only writes the final synthesis from a prepared bun
 | Frames with exact container timestamps, denser when the screen moves | script (ffmpeg) |
 | On-screen text (OCR) | script |
 | Transcript pass 1 | faster-whisper, local |
-| Transcript pass 2 (low-confidence spans, glossary from metadata/OCR) | small local model (Gemma/Qwen), else a cheap API model |
+| Transcript pass 2 (misheard words, glossary from metadata/OCR) | cheap online model (GPT Luna class) |
 | Pick the most telling frame per chapter | cheap model |
 | Outline, themes, key moments, sheet text | chief model, text bundle + 6–20 frames |
 | PDF / PPTX rendering, time-code links | script, template |
 | Archive working folder as zip; recycle bin only on explicit option | script |
 
 Owner decisions: video kept intact (sponsor segments listed, not cut); recycle bin only on an
-explicit option; mobile app postponed (later a thin client); small local model on the PC for pass 2;
-installable in minutes on Windows, macOS and Linux, reusing tools already present.
+explicit option; mobile app postponed (later a thin client); cheap online model for pass 2 (local
+models dropped after the 2026-11-26 benchmark); installable in minutes on Windows, macOS and Linux,
+reusing tools already present.
 
 Step order: 1 fetch + metadata + exact timestamps → 2 per-chapter aligned bundle (speech + frames +
-OCR) → 3 local transcript correction → 4 PDF/PPTX sheet → later: knowledge base, review, mobile.
+OCR) → 3 transcript correction (cheap online model) → 4 PDF/PPTX sheet → later: knowledge base,
+review, mobile.
+
+## Step 3 — correction model benchmark (2026-11-26)
+Whisper `small` output corrected in chunks of 40 segments with one prompt, scored as word error
+rate (WER) against human subtitles: an 8-min French science video and a 20-min English TED talk.
+Local models ran with Ollama on a laptop GPU with 4 GB of memory and 16 GB of RAM.
+
+| Corrector | WER fr (raw 9.0 %) | WER en (raw 8.0 %) | Time per video hour | Cost per video hour |
+|---|---|---|---|---|
+| GPT Luna, online | 6.7 % | 7.5 % | ~8 min, sequential calls | ~$0.015 |
+| Claude Haiku 5.5, online | 6.8 % | 7.7 %, one chunk refused as copyrighted | ~8 min | ~$0.03–0.04 |
+| Gemma 4 E4B, local | 7.5 % | 7.8 % | ~32–42 min | none |
+| Qwen 3 4B instruct, local | 8.1 % | not measured | ~72 min | none |
+| Whisper `medium`, no correction | 7.6 % | not measured | — | none |
+
+Decision: pass 2 uses a cheap online model. The local models corrected less, ran about five times
+slower, did not fit in GPU memory and saturated RAM; an online model is needed anyway for the
+sheet (step 4). Part of the remaining WER is editorial: human subtitles drop fillers and lightly
+reword, which a correction must not reproduce.
 
 ## Step 1 — acceptance criteria
 1. `fetch_video.py <url>` downloads one video (playlist and live refused; exit codes 0/1/2/3) and
