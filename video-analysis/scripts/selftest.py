@@ -323,7 +323,8 @@ def check_documentation_contract() -> bool:
 
 
 def check_script_help_contract() -> bool:
-    scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py")
+    scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py",
+               "analyze_video.py")
     for script in scripts:
         result = subprocess.run([sys.executable, str(HERE / script), "-h"],
                                 capture_output=True, text=True, check=False)
@@ -704,6 +705,127 @@ def check_setup_ocr_readiness() -> bool:
             and "OCR: rapidocr missing" in missing_output.getvalue())
 
 
+def check_analyze_video_local_pipeline() -> bool:
+    import analyze_video
+    calls = []
+    with patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0), \
+            patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0), \
+            contextlib.redirect_stderr(io.StringIO()):
+        code = analyze_video.main(["C:\\videos\\talk.mp4", "--skip-transcript", "--skip-ocr",
+                                   "--language", "fr", "--interval", "3", "--at", "00:00:10"])
+    return (code == 0 and [call[0] for call in calls] == ["extract", "bundle"]
+            and calls[0][1][0] == "C:\\videos\\talk.mp4"
+            and "--skip-transcript" in calls[0][1] and "--skip-ocr" in calls[1][1]
+            and calls[0][1][calls[0][1].index("--language") + 1] == "fr"
+            and calls[1][1][calls[1][1].index("--language") + 1] == "fr"
+            and "--at" in calls[0][1] and "--interval" in calls[0][1])
+
+
+def check_analyze_video_url_pipeline() -> bool:
+    import analyze_video
+    calls = []
+    def fetch(argv, *, on_video=None):
+        calls.append(("fetch", argv))
+        on_video(Path("downloaded.mp4"))
+        return 0
+    with patch.object(analyze_video, "fetch_main", side_effect=fetch), \
+            patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append(("extract", argv)) or 0), \
+            patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0), \
+            contextlib.redirect_stderr(io.StringIO()):
+        code = analyze_video.main(["https://example.invalid/talk", "--dest", "downloads", "--sub-langs", "fr"])
+    return (code == 0 and [call[0] for call in calls] == ["fetch", "extract", "bundle"]
+            and calls[1][1][0] == "downloaded.mp4")
+
+
+def check_analyze_video_stops_on_failure() -> bool:
+    import analyze_video
+    calls = []
+    for failure in (1, 2, 3):
+        with patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append("extract") or failure), \
+                patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append("bundle") or 0), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = analyze_video.main(["talk.mp4"])
+        if code != failure or calls != ["extract"]:
+            return False
+        calls.clear()
+    with patch.object(analyze_video, "extract_main", return_value=0), \
+            patch.object(analyze_video, "bundle_main", return_value=0), \
+            contextlib.redirect_stderr(io.StringIO()):
+        invalid_local = analyze_video.main(["C:\\videos\\talk.mp4", "--sub-langs", "fr"])
+    with patch.object(analyze_video, "fetch_main", return_value=3), \
+            patch.object(analyze_video, "extract_main", side_effect=lambda argv: calls.append("unexpected")), \
+            contextlib.redirect_stderr(io.StringIO()):
+        fetch_failure = analyze_video.main(["https://example.invalid/talk"])
+    return invalid_local == 2 and fetch_failure == 3 and calls == []
+
+
+def check_setup_entry_modes() -> bool:
+    import setup_tools
+    calls = []
+    with patch.object(setup_tools, "run_selftest", side_effect=lambda: calls.append("selftest") or 0), \
+            patch.object(setup_tools, "missing_packages", side_effect=lambda **kwargs: calls.append("missing") or []), \
+            patch.object(setup_tools, "report_tools", side_effect=lambda *args: calls.append("report") or True), \
+            patch.object(setup_tools, "ffmpeg_works", side_effect=lambda *args: calls.append("ffmpeg") or True), \
+            patch.object(setup_tools, "model_cached", side_effect=lambda *args: calls.append("model") or True), \
+            patch.object(setup_tools, "warm_ocr", side_effect=lambda: calls.append("warm") or True):
+        with patch.object(setup_tools, "run_selftest", return_value=7):
+            check_code = setup_tools.main(["--check"])
+        check_calls = list(calls)
+        calls.clear()
+        normal_code = setup_tools.main(["--no-model-download"])
+        normal_calls = list(calls)
+        with patch.object(setup_tools, "run_selftest", return_value=5):
+            failed_selftest = setup_tools.main(["--no-model-download"])
+    run_call = SimpleNamespace(returncode=9)
+    with patch.object(setup_tools.subprocess, "run", return_value=run_call) as subprocess_run, \
+            patch.object(setup_tools.sys, "executable", "python-test"):
+        returned = setup_tools.run_selftest()
+    command = subprocess_run.call_args.args[0]
+    return (check_code == 7 and check_calls == [] and normal_code == 0
+            and normal_calls.count("selftest") == 1 and normal_calls.index("selftest") > normal_calls.index("warm")
+            and failed_selftest == 1 and returned == 9 and command ==
+            ["python-test", str(HERE / "selftest.py")] and "shell" not in subprocess_run.call_args.kwargs)
+
+
+def check_transient_key_frames_are_not_ocrd() -> bool:
+    import build_bundle
+    from bundle import FrameAssignment
+    from types import SimpleNamespace as NS
+    frames = {"frames/a.jpg": 0.0, "frames/b.jpg": 0.8, "frames/c.jpg": 1.8}
+    inputs = NS(manifest={"params": {"extract": {"sampling_mode": "adaptive", "sampling_fps": 1}}},
+                frames=frames, keyframes=["a.jpg", "b.jpg", "c.jpg"], work=Path("."))
+    assignments = [FrameAssignment(name, pts, 0, True) for name, pts in frames.items()]
+    seen = []
+    with patch("ocr.ocr_key_frames", side_effect=lambda values, **kwargs: seen.extend(values) or {values[0][0]: "text"}):
+        texts, ocr_frames, skipped = build_bundle.run_ocr(inputs, assignments,
+                                                           SimpleNamespace(skip_ocr=False, ocr_min_score=0.5))
+    adaptive_skips, window = build_bundle.transient_key_frames(
+        frames, inputs.keyframes, {"sampling_mode": "adaptive", "sampling_fps": 1})
+    fixed_skips, fixed_window = build_bundle.transient_key_frames(
+        frames, inputs.keyframes, {"sampling_mode": "fixed", "sampling_fps": 1})
+    legacy_inputs = NS(manifest={"source": {"path": "video"}, "params": {"bundle": {"ocr_engine": "skipped"}},
+                                 "stages": {"bundle": {"status": "done"}}}, identity={"path": "video"},
+                       work=Path("."))
+    with patch.object(Path, "exists", return_value=True):
+        legacy_resume = build_bundle.resume_outcome(
+            legacy_inputs, {"ocr_engine": "skipped", "ocr_skip_transient_s": None}) == 0
+        adaptive_conflict = build_bundle.resume_outcome(
+            legacy_inputs, {"ocr_engine": "skipped", "ocr_skip_transient_s": 1.05}) == 3
+    output_frames = __import__("bundle")._chapter_frames(0, assignments, [], texts, skipped)
+    params = build_bundle._bundle_params(
+        SimpleNamespace(skip_ocr=True, language="auto", ocr_min_score=0.5,
+                        min_chapter=30, max_chapter=600, target_chapter=300),
+        {"sampling_mode": "adaptive", "sampling_fps": 1})
+    return (len(seen) == 1 and seen[0][0] == "frames/c.jpg" and len(ocr_frames) == 1
+            and skipped == {"frames/a.jpg": "transient", "frames/b.jpg": "transient"}
+            and texts == {"frames/c.jpg": "text"} and adaptive_skips == {"a.jpg", "b.jpg"}
+            and window == 1.05 and not fixed_skips and fixed_window is None
+            and legacy_resume and adaptive_conflict
+            and params["ocr_skip_transient_s"] == 1.05
+            and output_frames[0]["ocr_text"] is None
+            and output_frames[0]["ocr_skipped"] == "transient")
+
+
 def check_build_bundle(video: Path) -> bool:
     result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
                             capture_output=True, text=True, check=False)
@@ -901,6 +1023,16 @@ def main() -> int:
         checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
         checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
         checks["OCR readiness reported by setup"] = run_check("OCR readiness reported by setup", check_setup_ocr_readiness)
+        checks["setup installs then tests and check only tests"] = run_check(
+            "setup installs then tests and check only tests", check_setup_entry_modes)
+        checks["analyze_video local pipeline"] = run_check(
+            "analyze_video local pipeline", check_analyze_video_local_pipeline)
+        checks["analyze_video URL pipeline"] = run_check(
+            "analyze_video URL pipeline", check_analyze_video_url_pipeline)
+        checks["analyze_video stops on failure"] = run_check(
+            "analyze_video stops on failure", check_analyze_video_stops_on_failure)
+        checks["transient key frames are not OCR'd"] = run_check(
+            "transient key frames are not OCR'd", check_transient_key_frames_are_not_ocrd)
         checks["metadata normalization fixture"] = run_check("metadata normalization fixture", check_metadata_fixture)
         checks["temporary folders live in the app _temp folder"] = run_check(
             "temporary folders live in the app _temp folder",

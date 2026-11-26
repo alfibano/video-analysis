@@ -33,6 +33,9 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | OCR readiness reported by setup | setup reports a RapidOCR version or a clear missing state |
 | OCR uses bounded ONNX threads and reports progress | CPU thread selection is clamped and OCR progress follows terminal/redirected output policy |
 | OCR runtime thread count does not invalidate bundle resume | changing only the ONNX thread setting resumes the existing bundle |
+| transient key frames are not OCR'd | adaptive key frames followed within the sampling window are marked and omitted from OCR |
+| analyze_video local and URL pipelines | local input extracts then bundles; URL input fetches, extracts, and bundles through mocked steps |
+| setup installs then tests and check only tests | normal setup runs the offline self-test after readiness; --check runs only that test |
 | fetch progress is bounded by output mode | yt-dlp progress hooks report bounded percentage or unknown-size progress |
 | offset container PTS preserved | timestamp names and `frames.json` preserve a nonzero container offset |
 | real OCR smoke | generated `Résumé` text is recognized, or reports `SKIP` when RapidOCR is unavailable |
@@ -49,6 +52,9 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 The two refusal checks matter: a guard that has never been seen refusing proves nothing.
 
 ## When to run it
+
+Normal setup runs this suite after readiness. Run setup_tools.py --check to run only the offline
+self-test without installation or readiness probes.
 
 - **After installing** on a new machine, right after `setup_tools.py`.
 - **Before every release**, to make sure an improvement broke nothing.

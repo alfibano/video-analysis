@@ -6,6 +6,9 @@
 - Fetch reports bounded yt-dlp progress for terminal and redirected output.
 - Adaptive sampling keeps the base grid and frames around detected changes; --fixed-interval opts out.
 - Sampled frame names encode rounded PTS milliseconds; frames.json remains authoritative.
+- Added analyze_video.py for local and URL fetch → extract → bundle workflows.
+- setup_tools.py --check now runs only the offline self-test; normal setup runs it after readiness.
+- Adaptive bundle OCR skips transient key frames followed within the sampling window.
 
 ### Added
 - `build_bundle.py` creates a chapter-aligned `bundle.json` from `.analysis` files, with subtitle/Whisper speech, frame PTS, sponsor flags, and key-frame OCR. It resumes identical settings and refuses manifest conflicts.

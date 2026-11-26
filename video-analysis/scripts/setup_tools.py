@@ -7,6 +7,7 @@ import importlib.metadata
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from tools import Tool, resolve_ffmpeg, resolve_js_runtime, resolve_ytdlp
@@ -121,36 +122,36 @@ def warm_ocr() -> bool:
     return result.get("setup-warmup.png") is not None
 
 
-def main() -> int:
+def run_selftest() -> int:
+    result = subprocess.run([sys.executable, str(Path(__file__).with_name("selftest.py"))], check=False)
+    return result.returncode
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=("Install missing video-analysis packages and check ffmpeg, yt-dlp, and\n"
-                     "a JavaScript runtime, or check their availability without installing.\n"
-                     "Reads the local tool environment and writes missing packages or the\n"
-                     "cached Whisper model; installation and first-time model caching use\n"
-                     "the network.\n"
-                     "After setup, run selftest.py to check the skill with a synthetic video."),
-        epilog=("Example: python setup_tools.py --check --no-model-download\n"
+        description=("Install missing video-analysis packages, verify tools, and warm OCR.\n"
+                     "--check runs only the default offline self-test without setup probes.\n"
+                     "Normal setup may install packages or cache the Whisper model using the network.\n"
+                     "Successful setup ends by running the default offline self-test."),
+        epilog=("Example: python setup_tools.py --check\n"
                 "Exit codes: 0 ready; 1 dependency, tool, or model failure; 2 invalid arguments."))
     parser.add_argument("--check", action="store_true",
-                        help="report tool readiness without installing packages")
+                        help="run only the default offline self-test")
     parser.add_argument("--model", default="small",
                         help="Whisper model to cache or check (default: %(default)s)")
     parser.add_argument("--no-model-download", action="store_true",
                         help="skip checking or caching the Whisper model")
     try:
-        args = parser.parse_args()
+        args = parser.parse_args(argv)
     except SystemExit as exit_signal:
         return 0 if exit_signal.code == 0 else 2
 
+    if args.check:
+        return run_selftest()
     ffmpeg = resolve_ffmpeg()
     absent = missing_packages(ffmpeg=ffmpeg)
-    if args.check:
-        ready = report_tools(ffmpeg, resolve_ytdlp(), resolve_js_runtime())
-        if absent:
-            print("missing:", ", ".join(absent))
-            return 1
-    elif absent:
+    if absent:
         if not install(absent):
             print("pip install failed")
             return 1
@@ -164,14 +165,15 @@ def main() -> int:
         ready = report_tools(ffmpeg, resolve_ytdlp(), resolve_js_runtime())
     if not ffmpeg_works(ffmpeg):
         return 1
-    if args.check and not args.no_model_download and not model_cached(args.model):
+    if not args.no_model_download and not cache_model(args.model):
         return 1
-    if not args.check and not args.no_model_download and not cache_model(args.model):
-        return 1
-    if not args.check and not warm_ocr():
+    if not warm_ocr():
         return 1
     if not ready:
         print("NOT READY")
+        return 1
+    if run_selftest() != 0:
+        print("SELFTEST FAILED")
         return 1
     print("READY")
     return 0

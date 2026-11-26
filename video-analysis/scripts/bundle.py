@@ -265,15 +265,19 @@ def _chapter_speech(chapter: Chapter, index: int, last_index: int,
 
 
 def _chapter_frames(chapter_index: int, frames: Sequence[FrameAssignment],
-                    sponsors: Sequence[Sponsor], ocr_texts: Mapping[str, str]) -> list[dict[str, Any]]:
+                    sponsors: Sequence[Sponsor], ocr_texts: Mapping[str, str],
+                    ocr_skipped: Mapping[str, str]) -> list[dict[str, Any]]:
     result = []
     for frame in frames:
         if frame.chapter_index != chapter_index:
             continue
         sponsored = any(item.start <= frame.pts < item.end for item in sponsors)
-        result.append({"file": frame.file, "pts": frame.pts, "is_key": frame.is_key,
-                       "is_sponsor": sponsored, "alignment": "in_range",
-                       "ocr_text": ocr_texts.get(frame.file) if frame.is_key else None})
+        item = {"file": frame.file, "pts": frame.pts, "is_key": frame.is_key,
+                "is_sponsor": sponsored, "alignment": "in_range",
+                "ocr_text": ocr_texts.get(frame.file) if frame.is_key else None}
+        if frame.file in ocr_skipped:
+            item["ocr_skipped"] = ocr_skipped[frame.file]
+        result.append(item)
     return result
 
 
@@ -289,12 +293,13 @@ def _sponsor_overlap(chapter: Chapter, sponsors: Sequence[Sponsor]) -> list[dict
 
 def _assemble_chapter(index: int, last_index: int, chapter: Chapter,
                       segments: Sequence[SpeechSegment], frames: Sequence[FrameAssignment],
-                      sponsors: Sequence[Sponsor], ocr_texts: Mapping[str, str]) -> dict[str, Any]:
+                      sponsors: Sequence[Sponsor], ocr_texts: Mapping[str, str],
+                      ocr_skipped: Mapping[str, str]) -> dict[str, Any]:
     speech = _chapter_speech(chapter, index, last_index, segments, sponsors)
     return {"index": index, "title": chapter.title, "start": chapter.start, "end": chapter.end,
             "source": chapter.source,
             "speech_text": " ".join(item["text"] for item in speech if not item["is_sponsor"]),
-            "speech_segments": speech, "frames": _chapter_frames(index, frames, sponsors, ocr_texts),
+            "speech_segments": speech, "frames": _chapter_frames(index, frames, sponsors, ocr_texts, ocr_skipped),
             "sponsor_overlap": _sponsor_overlap(chapter, sponsors)}
 
 
@@ -302,12 +307,13 @@ def build_bundle(metadata: Mapping[str, Any], chapters: Sequence[Chapter],
                  speech_segments: Sequence[SpeechSegment], frames: Sequence[FrameAssignment],
                  sponsors: Sequence[Sponsor], *, speech_source: SpeechSource | None = None,
                  speech_language: str | None = None, speech_file: str | None = None,
-                 ocr_texts: Mapping[str, str] | None = None) -> dict[str, Any]:
+                 ocr_texts: Mapping[str, str] | None = None,
+                 ocr_skipped: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Build schema-version-1 bundle data from normalized pure inputs."""
     chapters = list(chapters) or discover_chapters([], float(metadata.get("duration") or 0))
     source = speech_source or SpeechSource("none", speech_language, speech_file)
     output = [_assemble_chapter(i, len(chapters) - 1, chapter, speech_segments, frames,
-                                sponsors, ocr_texts or {}) for i, chapter in enumerate(chapters)]
+                                sponsors, ocr_texts or {}, ocr_skipped or {}) for i, chapter in enumerate(chapters)]
     return {"schema_version": 1,
             "source": {key: metadata.get(key) for key in ("title", "author", "channel", "url", "duration", "video")},
             "speech": {"source": source.source, "language": source.language, "file": source.file},

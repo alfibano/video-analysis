@@ -188,7 +188,8 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     return work
 
 
-def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]], Any] | None = None) -> int:
+def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]], Any] | None = None,
+         on_video: Callable[[Path], None] | None = None) -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=("Fetch one online video, refusing playlists and live or upcoming\n"
@@ -222,6 +223,8 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
             info = download_video(args.url, ydl)
             video = _video_path(info, ydl)
             context_ydl = ydl
+        if on_video is not None:
+            on_video(video)
         languages = options["subtitleslangs"]
         subtitle_info = {}
         subtitle_error = None

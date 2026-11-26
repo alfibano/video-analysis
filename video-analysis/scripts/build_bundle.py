@@ -47,6 +47,7 @@ class BundleResult:
     speech: SpeechRead
     ocr_texts: dict[str, str]
     ocr_frames: list[Any]
+    ocr_skipped: dict[str, str]
 
 
 class BundleInputError(ValueError):
@@ -235,7 +236,27 @@ def _speech_segments(inputs: BundleInputs, source: Any) -> list[SpeechSegment]:
     return dedupe_rolling_cues(parsed) if source.source == "automatic" else parsed
 
 
-def _bundle_params(args: argparse.Namespace) -> dict[str, Any]:
+def transient_key_frames(frames: dict[str, Any], keyframes: list[str],
+                         extract: dict[str, Any]) -> tuple[set[str], float | None]:
+    """Find adaptive key frames followed quickly by another key frame."""
+    if extract.get("sampling_mode") != "adaptive":
+        return set(), None
+    try:
+        fps = float(extract.get("sampling_fps"))
+    except (TypeError, ValueError):
+        return set(), None
+    if not math.isfinite(fps) or fps <= 0:
+        return set(), None
+    window = 1 / fps + 0.05
+    key_names = {Path(name).name for name in keyframes}
+    ordered = sorted(((float(pts), Path(name).name) for name, pts in frames.items()
+                      if Path(name).name in key_names and _finite(pts)), key=lambda item: item[0])
+    skipped = {name for (pts, name), (next_pts, _) in zip(ordered, ordered[1:])
+               if next_pts <= pts + window}
+    return skipped, window
+
+
+def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = None) -> dict[str, Any]:
     engine = "skipped" if args.skip_ocr else _ocr_version()
     if args.skip_ocr:
         ocr_threads = None
@@ -246,7 +267,8 @@ def _bundle_params(args: argparse.Namespace) -> dict[str, Any]:
     return {"language": args.language, "ocr_min_score": args.ocr_min_score,
             "min_chapter": args.min_chapter, "max_chapter": args.max_chapter,
             "target_chapter": args.target_chapter, "skip_ocr": args.skip_ocr,
-            "ocr_engine": engine, "ocr_intra_op_threads": ocr_threads}
+            "ocr_engine": engine, "ocr_intra_op_threads": ocr_threads,
+            "ocr_skip_transient_s": transient_key_frames({}, [], extract or {})[1]}
 
 
 def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
@@ -264,6 +286,9 @@ def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
         return 3
     previous_signature = dict(previous or {})
     current_signature = dict(params)
+    if current_signature.get("ocr_skip_transient_s") is None:
+        current_signature.setdefault("ocr_skip_transient_s", None)
+        previous_signature.setdefault("ocr_skip_transient_s", None)
     previous_signature.pop("ocr_intra_op_threads", None)
     current_signature.pop("ocr_intra_op_threads", None)
     if previous_signature != current_signature:
@@ -286,24 +311,29 @@ def _make_chapters(inputs: BundleInputs, args: argparse.Namespace,
 
 
 def run_ocr(inputs: BundleInputs, assignments: list[Any],
-            args: argparse.Namespace) -> tuple[dict[str, str], list[Any]]:
+            args: argparse.Namespace) -> tuple[dict[str, str], list[Any], dict[str, str]]:
     if args.skip_ocr:
-        return {}, []
+        return {}, [], {}
     from ocr import ocr_key_frames
-    frames = [(item.file, inputs.work / item.file) for item in assignments if item.is_key]
-    return ocr_key_frames(frames, min_score=args.ocr_min_score), frames
+    extract = inputs.manifest.get("params", {}).get("extract", {})
+    skipped_names, _ = transient_key_frames(inputs.frames, inputs.keyframes, extract)
+    skipped = {item.file: "transient" for item in assignments
+               if item.is_key and Path(item.file).name in skipped_names}
+    frames = [(item.file, inputs.work / item.file) for item in assignments
+              if item.is_key and item.file not in skipped]
+    return ocr_key_frames(frames, min_score=args.ocr_min_score), frames, skipped
 
 
 def _prepare(inputs: BundleInputs, args: argparse.Namespace) -> BundleResult:
     speech = _read_speech(inputs, args.language)
     chapters, assignments = _make_chapters(inputs, args, speech)
-    return BundleResult(chapters, assignments, speech, {}, [])
+    return BundleResult(chapters, assignments, speech, {}, [], {})
 
 
 def _with_ocr(inputs: BundleInputs, result: BundleResult,
               args: argparse.Namespace) -> BundleResult:
-    texts, frames = run_ocr(inputs, result.assignments, args)
-    return BundleResult(result.chapters, result.assignments, result.speech, texts, frames)
+    texts, frames, skipped = run_ocr(inputs, result.assignments, args)
+    return BundleResult(result.chapters, result.assignments, result.speech, texts, frames, skipped)
 
 
 def write_outputs(inputs: BundleInputs, result: BundleResult,
@@ -313,7 +343,7 @@ def write_outputs(inputs: BundleInputs, result: BundleResult,
                           result.assignments, inputs.sponsors,
                           speech_language=speech.language, speech_file=speech.file,
                           speech_source=SpeechSource(speech.source, speech.language, speech.file),
-                          ocr_texts=result.ocr_texts)
+                          ocr_texts=result.ocr_texts, ocr_skipped=result.ocr_skipped)
     _write_bundle(inputs, result, params, bundle)
     _report_bundle(inputs, result, speech.source)
     return 0
@@ -326,7 +356,8 @@ def _write_bundle(inputs: BundleInputs, result: BundleResult,
     inputs.manifest.setdefault("params", {})["bundle"] = params
     inputs.manifest.setdefault("stages", {})["bundle"] = {
         "status": "done", "chapters": len(result.chapters), "frames": len(result.assignments),
-        "ocr_frames": len(result.ocr_frames), "speech_source": result.speech.source}
+        "ocr_frames": len(result.ocr_frames), "ocr_transient_skipped": len(result.ocr_skipped),
+        "speech_source": result.speech.source}
     (inputs.work / "manifest.json").write_text(
         json.dumps(inputs.manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
@@ -344,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         inputs = _load_inputs(args.video)
         result = _prepare(inputs, args)
-        params = _bundle_params(args)
+        params = _bundle_params(args, inputs.manifest.get("params", {}).get("extract", {}))
         outcome = resume_outcome(inputs, params)
         if outcome is not None:
             return outcome
