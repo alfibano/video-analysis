@@ -159,6 +159,12 @@ def _load_inputs(video: Path) -> BundleInputs:
     metadata, raw_info, transcript = _load_analysis_json(work)
     identity = _video_identity(video)
     manifest = _load_manifest(work, identity)
+    recorded_source = manifest.get("source") or {}
+    source_kind = recorded_source.get("kind")
+    if source_kind not in {"local", "url"}:
+        source_kind = "url" if manifest.get("params", {}).get("fetch", {}).get("url") else "local"
+    identity = {**identity, "kind": source_kind}
+    manifest["source"] = identity
     interval = _extract_interval(manifest.get("params", {}).get("extract", {}))
     frames, keyframes = _frames(work, interval)
     _validate_extraction_outputs(work, video, frames, transcript)
@@ -199,7 +205,8 @@ def _validate_extraction_outputs(work: Path, video: Path, frames: dict[str, Any]
 
 
 def _validate_manifest_source(manifest: dict[str, Any], identity: dict[str, Any]) -> None:
-    if manifest.get("source") != identity:
+    recorded = manifest.get("source") or {}
+    if any(recorded.get(key) != identity.get(key) for key in ("path", "size", "mtime_ns")):
         raise BundleInputError(
             f"bundle manifest conflict:\n  recorded: {manifest.get('source')}\n  now:      {identity}", 3)
 
@@ -275,7 +282,9 @@ def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = No
 
 def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
     manifest = inputs.manifest
-    if manifest.get("source") != inputs.identity:
+    recorded_source = manifest.get("source") or {}
+    if any(recorded_source.get(key) != inputs.identity.get(key)
+           for key in ("path", "size", "mtime_ns")):
         print(f"bundle manifest conflict:\n  recorded: {manifest.get('source')}\n  now:      {inputs.identity}")
         return 3
     previous = manifest.get("params", {}).get("bundle")

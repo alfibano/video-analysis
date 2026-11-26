@@ -186,6 +186,7 @@ def check_fetch_manifest() -> bool:
     has_progress = all(option.get("noprogress") is True
                        and len(option.get("progress_hooks", [])) == 1 for option in option_sets)
     return (calls == [False, True, True] and video.is_file() and (folder / "metadata.json").is_file()
+            and manifest["source"].get("kind") == "url"
             and manifest["params"]["fetch"]["url"].startswith("https://")
             and option_sets[1]["outtmpl"] == str(dest.resolve() / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.%(ext)s")
             and "fetch" in accepted["stages"] and has_sponsorblock and has_progress)
@@ -994,6 +995,77 @@ def check_extract_preserves_bundle_params() -> bool:
     return result["params"]["bundle"] == {"ocr_engine": "skipped"} and "bundle" in result["stages"]
 
 
+def check_manifest_source_kinds() -> bool:
+    from extract_video import load_manifest
+    from tools import make_temp_folder
+    folder = make_temp_folder("source-kind-")
+    video = folder / "local.mp4"
+    video.write_bytes(b"local")
+    stat = video.stat()
+    identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    local_work = folder / "local.analysis"
+    local_work.mkdir()
+    local = load_manifest(local_work, identity, {"interval": 5})
+    legacy = {"schema_version": 2, "source": identity,
+              "params": {"fetch": {"url": "https://example.invalid/v"}, "extract": {"interval": 5}},
+              "stages": {}}
+    legacy_work = folder / "legacy.analysis"
+    legacy_work.mkdir()
+    (legacy_work / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
+    migrated = load_manifest(legacy_work, identity, {"interval": 5})
+    return local["source"].get("kind") == "local" and migrated["source"].get("kind") == "url"
+
+
+def check_extract_preserves_correction_state() -> bool:
+    from extract_video import load_manifest
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-preserve-")
+    identity = {"path": "video.mp4", "size": 5, "mtime_ns": 10, "kind": "local"}
+    correction = {"model": "test-model", "source": {"kind": "whisper"}}
+    stage = {"status": "skipped", "reason": "manual subtitles"}
+    data = {"schema_version": 2, "source": {key: value for key, value in identity.items() if key != "kind"},
+            "params": {"fetch": {}, "extract": {"interval": 5}, "correct_transcript": correction},
+            "stages": {"correct_transcript": stage}}
+    (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    result = load_manifest(folder, {key: value for key, value in identity.items() if key != "kind"},
+                          {"interval": 5})
+    return (result["params"].get("correct_transcript") == correction
+            and result["stages"].get("correct_transcript") == stage
+            and result["source"].get("kind") == "local")
+
+
+def check_correction_exact_numbered_lines() -> bool:
+    from correct_transcript import parse_numbered_lines
+    parsed = parse_numbered_lines("1\tBonjour.\n2\tMerci.", [1, 2])
+    for invalid in ("1\tBonjour.", "1\tBonjour.\n1\tEncore", "1\tBonjour.\n2\tMerci.\n3\tExtra",
+                    "Voici la correction\n1\tBonjour.\n2\tMerci.", "1\t \n2\tMerci."):
+        if parse_numbered_lines(invalid, [1, 2]) is not None:
+            return False
+    return parsed == {1: "Bonjour.", 2: "Merci."}
+
+
+def check_correction_guards() -> bool:
+    from correct_transcript import CorrectionInput, correct_chunk
+    originals = [CorrectionInput(0, 1, "The cat sat on the mat today"),
+                 CorrectionInput(1, 2, "One two three four five six seven eight nine ten"),
+                 CorrectionInput(2, 3, "This phrase contains several familiar words here")]
+    response = "1\tThe cat sat on a mat today\n2\tOne\n3\tCompletely unrelated alternatives now replace these words"
+    result = correct_chunk(originals, response)
+    return ([item.status for item in result] == ["corrected", "rejected_edit_ratio", "rejected_edit_ratio"]
+            and [item.corrected_text for item in result[1:]] == [item.text for item in originals[1:]])
+
+
+def check_correction_safe_fallbacks() -> bool:
+    from correct_transcript import CorrectionInput, correct_chunk
+    originals = [CorrectionInput(0, 1, "Original one"), CorrectionInput(1, 2, "Original two")]
+    refused = correct_chunk(originals, None, refusal=True)
+    malformed = correct_chunk(originals, "1\tEdited one")
+    return ([item.status for item in refused] == ["fallback_refusal"] * 2
+            and [item.corrected_text for item in refused] == [item.text for item in originals]
+            and [item.status for item in malformed] == ["fallback_malformed"] * 2
+            and [item.corrected_text for item in malformed] == [item.text for item in originals])
+
+
 def check_real_ocr_smoke() -> tuple[bool, str]:
     try:
         from ocr import ocr_key_frames
@@ -1151,6 +1223,16 @@ def main() -> int:
             "bundle with fake fetch outputs prefers manual subtitles", check_bundle_manual_subtitle)
         checks["extract preserves bundle manifest params"] = run_check(
             "extract preserves bundle manifest params", check_extract_preserves_bundle_params)
+        checks["manifest records local and URL source kinds"] = run_check(
+            "manifest records local and URL source kinds", check_manifest_source_kinds)
+        checks["extract preserves correction manifest state"] = run_check(
+            "extract preserves correction manifest state", check_extract_preserves_correction_state)
+        checks["correction contract parses exact numbered lines"] = run_check(
+            "correction contract parses exact numbered lines", check_correction_exact_numbered_lines)
+        checks["correction guard rejects paraphrase and omission"] = run_check(
+            "correction guard rejects paraphrase and omission", check_correction_guards)
+        checks["correction refusal and malformed chunks keep originals"] = run_check(
+            "correction refusal and malformed chunks keep originals", check_correction_safe_fallbacks)
         real_ocr_ok, real_ocr_status = check_real_ocr_smoke()
         checks["real OCR smoke"] = real_ocr_ok
         CHECK_OUTPUTS["real OCR smoke"] = real_ocr_status

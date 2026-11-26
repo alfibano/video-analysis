@@ -327,7 +327,7 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         if any(work.iterdir()):
             raise FileExistsError(f"{work} is not empty and has no manifest: refusing to mix outputs.\n"
                                   "Send that folder to the Recycle Bin (trash skill), then re-run.")
-        return {"schema_version": 2, "source": identity,
+        return {"schema_version": 2, "source": {**identity, "kind": "local"},
                 "params": {"fetch": {}, "extract": params}, "stages": {}}
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") == 2:
@@ -346,14 +346,21 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         manifest = {"schema_version": 2, "source": manifest.get("source"),
                     "params": {"fetch": fetch_params, "extract": extract_params},
                     "stages": manifest.get("stages", {})}
+    recorded_source = manifest.get("source") or {}
+    if recorded_source.get("kind") not in {"local", "url"}:
+        recorded_source = {**recorded_source,
+                           "kind": "url" if fetch_params.get("url") else "local"}
+    source_matches = all(recorded_source.get(key) == identity.get(key)
+                         for key in ("path", "size", "mtime_ns"))
     if fetch_only_unconfigured:
         extract_params = params
-    if manifest.get("source") != identity or extract_params != params:
+    if not source_matches or extract_params != params:
         raise FileExistsError(
             f"{work} was made from another video or other parameters.\n"
-            f"  recorded: {manifest.get('source')} {extract_params}\n"
+            f"  recorded: {recorded_source} {extract_params}\n"
             f"  now:      {identity} {params}\n"
             "Send that folder to the Recycle Bin (trash skill), then re-run.")
+    manifest["source"] = recorded_source
     manifest["params"] = {"fetch": fetch_params, "extract": extract_params, **other_params}
     return manifest
 

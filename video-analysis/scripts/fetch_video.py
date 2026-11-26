@@ -202,7 +202,7 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
 
     stat = video.stat()
     identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    manifest = {"schema_version": 2, "source": identity,
+    manifest = {"schema_version": 2, "source": {**identity, "kind": "url"},
                 "params": {"fetch": fetch_params, "extract": {}},
                 "stages": {"fetch": {"status": "done", "subtitles": subtitles}}}
     (work / "manifest.json").write_text(_bounded_json(manifest), encoding="utf-8")

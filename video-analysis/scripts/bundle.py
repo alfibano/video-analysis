@@ -28,6 +28,7 @@ class SpeechSource:
     source: str
     language: str | None
     file: str | None
+    corrected_from: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,27 @@ def select_speech_source(language: str | None, raw_info: Mapping[str, Any],
     if transcript_available:
         return SpeechSource("whisper", transcript_language or selected_language, "transcript.json")
     return SpeechSource("none", selected_language, None)
+
+
+def read_speech_segments(source: SpeechSource, work: Path,
+                         transcript: Mapping[str, Any]) -> list[SpeechSegment]:
+    """Read selected speech with the same Whisper and caption normalization everywhere."""
+    if source.source == "whisper":
+        raw_segments = transcript.get("segments", [])
+        if not isinstance(raw_segments, list):
+            return []
+        return [SpeechSegment(float(item["start"]), float(item["end"]), str(item["text"]).strip())
+                for item in raw_segments if isinstance(item, Mapping)
+                and _finite(item.get("start")) is not None and _finite(item.get("end")) is not None
+                and float(item["end"]) > float(item["start"]) and str(item.get("text", "")).strip()]
+    if source.source not in {"manual", "automatic"} or not source.file:
+        return []
+    path = Path(source.file)
+    if not path.is_absolute():
+        path = work / path
+    text = path.read_text(encoding="utf-8-sig")
+    parsed = parse_vtt(text, rolling=source.source == "automatic") if path.suffix.lower() == ".vtt" else parse_srt(text)
+    return dedupe_rolling_cues(parsed) if source.source == "automatic" else parsed
 
 
 def align_frames(frames: Mapping[str, Any], chapters: Sequence[Chapter],
