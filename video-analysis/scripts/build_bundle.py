@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from bundle import (SpeechSegment, SpeechSource, align_frames, build_bundle, discover_chapters,
-                    dedupe_rolling_cues, parse_sponsors, parse_srt, parse_vtt,
+                    read_speech_segments, parse_sponsors,
                     select_speech_source)
+from tools import media_source_kind, same_video
 
 
 @dataclass(frozen=True)
@@ -160,9 +161,7 @@ def _load_inputs(video: Path) -> BundleInputs:
     identity = _video_identity(video)
     manifest = _load_manifest(work, identity)
     recorded_source = manifest.get("source") or {}
-    source_kind = recorded_source.get("kind")
-    if source_kind not in {"local", "url"}:
-        source_kind = "url" if manifest.get("params", {}).get("fetch", {}).get("url") else "local"
+    source_kind = media_source_kind(manifest)
     identity = {**identity, "kind": source_kind}
     manifest["source"] = identity
     interval = _extract_interval(manifest.get("params", {}).get("extract", {}))
@@ -206,7 +205,7 @@ def _validate_extraction_outputs(work: Path, video: Path, frames: dict[str, Any]
 
 def _validate_manifest_source(manifest: dict[str, Any], identity: dict[str, Any]) -> None:
     recorded = manifest.get("source") or {}
-    if any(recorded.get(key) != identity.get(key) for key in ("path", "size", "mtime_ns")):
+    if not same_video(recorded, identity):
         raise BundleInputError(
             f"bundle manifest conflict:\n  recorded: {manifest.get('source')}\n  now:      {identity}", 3)
 
@@ -227,22 +226,8 @@ def _read_speech(inputs: BundleInputs, language: str) -> SpeechRead:
                                   transcript_available=isinstance(transcript, dict)
                                   and isinstance(transcript.get("segments"), list),
                                   video_stem=str(inputs.metadata.get("video_stem") or ""))
-    segments = _speech_segments(inputs, source)
+    segments = read_speech_segments(source, inputs.work, transcript)
     return SpeechRead(segments, source.language, source.file, source.source)
-
-
-def _speech_segments(inputs: BundleInputs, source: Any) -> list[SpeechSegment]:
-    if source.source == "whisper":
-        return [SpeechSegment(float(item["start"]), float(item["end"]), str(item["text"]).strip())
-                for item in inputs.transcript.get("segments", []) if isinstance(item, dict)
-                and _finite(item.get("start")) and _finite(item.get("end"))
-                and float(item["end"]) > float(item["start"]) and str(item.get("text", "")).strip()]
-    if source.source not in {"manual", "automatic"} or not source.file:
-        return []
-    path = Path(source.file)
-    text = path.read_text(encoding="utf-8-sig")
-    parsed = parse_vtt(text, rolling=source.source == "automatic") if path.suffix.lower() == ".vtt" else parse_srt(text)
-    return dedupe_rolling_cues(parsed) if source.source == "automatic" else parsed
 
 
 def transient_key_frames(frames: dict[str, Any], keyframes: list[str],
@@ -283,8 +268,7 @@ def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = No
 def resume_outcome(inputs: BundleInputs, params: dict[str, Any]) -> int | None:
     manifest = inputs.manifest
     recorded_source = manifest.get("source") or {}
-    if any(recorded_source.get(key) != inputs.identity.get(key)
-           for key in ("path", "size", "mtime_ns")):
+    if not same_video(recorded_source, inputs.identity):
         print(f"bundle manifest conflict:\n  recorded: {manifest.get('source')}\n  now:      {inputs.identity}")
         return 3
     previous = manifest.get("params", {}).get("bundle")

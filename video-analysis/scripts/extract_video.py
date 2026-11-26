@@ -322,6 +322,7 @@ def exact_frames(video: Path, work: Path, times: list[float], duration: float) -
 
 
 def load_manifest(work: Path, identity: dict[str, object], params: dict[str, object]) -> dict:
+    from tools import media_source_kind, same_video
     path = work / "manifest.json"
     if not path.exists():
         if any(work.iterdir()):
@@ -349,9 +350,9 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
     recorded_source = manifest.get("source") or {}
     if recorded_source.get("kind") not in {"local", "url"}:
         recorded_source = {**recorded_source,
-                           "kind": "url" if fetch_params.get("url") else "local"}
-    source_matches = all(recorded_source.get(key) == identity.get(key)
-                         for key in ("path", "size", "mtime_ns"))
+                           "kind": media_source_kind({"source": recorded_source,
+                                                      "params": {"fetch": fetch_params}})}
+    source_matches = same_video(recorded_source, identity)
     if fetch_only_unconfigured:
         extract_params = params
     if not source_matches or extract_params != params:

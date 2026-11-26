@@ -12,6 +12,22 @@ from typing import Any, Callable, Literal, Mapping
 TEMP_DIR_ENV = "VIDEO_ANALYSIS_TEMP_DIR"
 
 
+def media_source_kind(manifest: Mapping[str, Any]) -> str:
+    """Return the declared media kind, migrating legacy fetch manifests in memory."""
+    source = manifest.get("source")
+    kind = source.get("kind") if isinstance(source, Mapping) else None
+    if kind in {"local", "url"}:
+        return str(kind)
+    params = manifest.get("params")
+    fetch = params.get("fetch") if isinstance(params, Mapping) else None
+    return "url" if isinstance(fetch, Mapping) and fetch.get("url") else "local"
+
+
+def same_video(recorded: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    """Compare the stable video identity fields shared by extraction and later stages."""
+    return all(recorded.get(key) == identity.get(key) for key in ("path", "size", "mtime_ns"))
+
+
 def app_temp_path(env: Mapping[str, str] | None = None) -> Path:
     environ = os.environ if env is None else env
     override = environ.get(TEMP_DIR_ENV, "").strip()

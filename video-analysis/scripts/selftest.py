@@ -1045,25 +1045,230 @@ def check_correction_exact_numbered_lines() -> bool:
 
 
 def check_correction_guards() -> bool:
-    from correct_transcript import CorrectionInput, correct_chunk
+    from correct_transcript import CorrectionInput, ProviderResult, correct_chunk
     originals = [CorrectionInput(0, 1, "The cat sat on the mat today"),
                  CorrectionInput(1, 2, "One two three four five six seven eight nine ten"),
                  CorrectionInput(2, 3, "This phrase contains several familiar words here")]
     response = "1\tThe cat sat on a mat today\n2\tOne\n3\tCompletely unrelated alternatives now replace these words"
-    result = correct_chunk(originals, response)
+    result = correct_chunk(originals, ProviderResult(response))
     return ([item.status for item in result] == ["corrected", "rejected_edit_ratio", "rejected_edit_ratio"]
             and [item.corrected_text for item in result[1:]] == [item.text for item in originals[1:]])
 
 
 def check_correction_safe_fallbacks() -> bool:
-    from correct_transcript import CorrectionInput, correct_chunk
+    from correct_transcript import CorrectionInput, ProviderResult, correct_chunk
     originals = [CorrectionInput(0, 1, "Original one"), CorrectionInput(1, 2, "Original two")]
-    refused = correct_chunk(originals, None, refusal=True)
-    malformed = correct_chunk(originals, "1\tEdited one")
+    refused = correct_chunk(originals, ProviderResult(None, refusal=True))
+    malformed = correct_chunk(originals, ProviderResult("1\tEdited one"))
     return ([item.status for item in refused] == ["fallback_refusal"] * 2
             and [item.corrected_text for item in refused] == [item.text for item in originals]
             and [item.status for item in malformed] == ["fallback_malformed"] * 2
             and [item.corrected_text for item in malformed] == [item.text for item in originals])
+
+
+def check_correction_shared_helpers_and_speech_reader() -> bool:
+    from bundle import SpeechSource, read_speech_segments
+    from tools import media_source_kind, same_video
+    from correct_transcript import CorrectTranscriptConfig
+    video = {"path": "video.mp4", "size": 12, "mtime_ns": 34}
+    manifest = {"params": {"fetch": {"url": "https://example.invalid/v"}}}
+    return (media_source_kind(manifest) == "url" and same_video(video, dict(video))
+            and not same_video(video, {**video, "size": 13})
+            and callable(read_speech_segments) and CorrectTranscriptConfig is not None)
+
+
+def check_correction_consent_matrix() -> bool:
+    from correct_transcript import consent_required
+    return (consent_required("local", "remote")
+            and not consent_required("url", "remote")
+            and not consent_required("local", "local"))
+
+
+def check_correction_skip_modes() -> bool:
+    from correct_transcript import correction_skip_reason
+    return (correction_skip_reason(no_correct=True, source="whisper", api_key=None) == "disabled"
+            and correction_skip_reason(no_correct=False, source="none", api_key="secret") == "no speech source"
+            and correction_skip_reason(no_correct=False, source="whisper", api_key=None) == "no API key")
+
+
+def check_correction_consent_matrix_blocks_before_provider_call() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-consent-")
+    video = folder / "local.mp4"
+    video.write_bytes(b"video")
+    work = folder / "local.analysis"
+    work.mkdir()
+    (work / "manifest.json").write_text(json.dumps({"schema_version": 2,
+        "source": {"kind": "local", "path": str(video.resolve()), "size": video.stat().st_size,
+                   "mtime_ns": video.stat().st_mtime_ns}, "params": {"fetch": {}, "extract": {}}, "stages": {}}), encoding="utf-8")
+    (work / "transcript.json").write_text(json.dumps({"language": "fr", "segments": [{"start": 0, "end": 1, "text": "Bonjour."}]}), encoding="utf-8")
+    class NeverClient:
+        def correct(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("provider called before consent")
+    result = run_correction(video, client_factory=lambda **kwargs: NeverClient(), environ={
+        "OPENAI_API_KEY": "fake", "VIDEO_ANALYSIS_AI_LOCALITY": "remote"}, allow_remote_ai=False,
+        interactive=False)
+    class AllowedClient:
+        def correct(self, **kwargs: Any) -> Any:
+            return {"text": "1\tBonjour."}
+    allowed = run_correction(video, client_factory=lambda **kwargs: AllowedClient(), api_key="fake",
+                             locality="remote", allow_remote_ai=True)
+    stage = json.loads((work / "manifest.json").read_text(encoding="utf-8"))["stages"]["correct_transcript"]
+    return result == 4 and allowed == 0 and stage.get("consent") == {"granted": True, "method": "flag"}
+
+
+def check_correction_skip_modes_stay_offline() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-skip-")
+    video = folder / "skip.mp4"
+    video.write_bytes(b"video")
+    (folder / "skip.analysis").mkdir()
+    class NeverClient:
+        def __call__(self, **kwargs: Any) -> Any:
+            raise AssertionError("provider constructed for a skipped correction")
+    disabled = run_correction(video, client_factory=NeverClient(), no_correct=True)
+    (folder / "skip.analysis" / "transcript.json").write_text(json.dumps({"language": "en",
+        "segments": [{"start": 0, "end": 1, "text": "offline"}]}), encoding="utf-8")
+    missing_key = run_correction(video, client_factory=NeverClient(), environ={}, locality="remote")
+    stage = json.loads((folder / "skip.analysis" / "manifest.json").read_text(encoding="utf-8"))["stages"]["correct_transcript"]
+    return disabled == 0 and missing_key == 0 and stage.get("reason") == "no API key"
+
+
+def check_manual_subtitles_skip_correction_unchanged() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-manual-")
+    video = folder / "manual.mp4"
+    video.write_bytes(b"video")
+    work = folder / "manual.analysis"
+    work.mkdir()
+    original = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nManual words\n"
+    (work / "manual.fr.vtt").write_text(original, encoding="utf-8")
+    (work / "raw_info.json").write_text(json.dumps({"language": "fr", "subtitles": {"fr": [{}]}}), encoding="utf-8")
+    (work / "transcript.json").write_text(json.dumps({"language": "fr", "segments": []}), encoding="utf-8")
+    result = run_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("manual subtitles must not call provider")), api_key="fake", locality="local")
+    return result == 0 and (work / "manual.fr.vtt").read_text(encoding="utf-8") == original
+
+
+def check_correction_resume_and_conflict_are_safe() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-resume-")
+    video = folder / "resume.mp4"
+    video.write_bytes(b"video")
+    work = folder / "resume.analysis"
+    work.mkdir()
+    (work / "transcript.json").write_text(json.dumps({"language": "fr", "segments": [{"start": 0, "end": 1, "text": "Bonjour."}]}), encoding="utf-8")
+    class FakeClient:
+        def correct(self, **kwargs: Any) -> Any:
+            return {"text": "1\tBonjour."}
+    options = {"api_key": "fake", "locality": "local"}
+    first = run_correction(video, client_factory=lambda **kwargs: FakeClient(), **options)
+    second = run_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("completed correction was not resumed")), **options)
+    changed = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake",
+                             locality="local", model="different")
+    return first == 0 and second == 0 and changed == 3
+
+
+def check_correction_fake_client_writes_validated_output() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-output-")
+    video = folder / "output.mp4"
+    video.write_bytes(b"video")
+    work = folder / "output.analysis"
+    work.mkdir()
+    source = {"language": "fr", "segments": [{"start": 0, "end": 1, "text": "Bonjour monde."}]}
+    (work / "transcript.json").write_text(json.dumps(source), encoding="utf-8")
+    class FakeClient:
+        def correct(self, **kwargs: Any) -> Any:
+            return {"text": "1\tBonjour, monde." , "usage": {"prompt_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 2}, "completion_tokens": 3,
+                    "completion_tokens_details": {"reasoning_tokens": 1}, "total_tokens": 11}}
+    result = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
+    output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    usage = manifest["stages"]["correct_transcript"]["usage"]
+    return (result == 0 and output["segments"][0]["corrected_text"] == "Bonjour, monde."
+            and output["schema_version"] == 1 and usage["cached_input_tokens"] == 2
+            and usage["reasoning_tokens"] == 1)
+
+
+def check_correction_calls_bounded_and_usage_recorded() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    import threading
+    folder = make_temp_folder("correction-concurrency-")
+    video = folder / "many.mp4"
+    video.write_bytes(b"video")
+    work = folder / "many.analysis"
+    work.mkdir()
+    segments = [{"start": i, "end": i + 1, "text": "same words here"} for i in range(81)]
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": segments}), encoding="utf-8")
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+    class FakeClient:
+        def correct(self, **kwargs: Any) -> Any:
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                lines = kwargs["user_prompt"].split("Transcript lines:\n", 1)[1].splitlines()
+                return {"text": "\n".join(f"{line.split(chr(9), 1)[0]}\tsame words here" for line in lines),
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}
+            finally:
+                with lock:
+                    active -= 1
+    result = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    usage = manifest["stages"]["correct_transcript"]["usage"]
+    return result == 0 and manifest["stages"]["correct_transcript"]["chunks"] == 3 and maximum <= 2 and usage["total_tokens"] == 9
+
+
+def check_correction_provider_errors_fall_back_per_chunk() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-fallback-")
+    video = folder / "error.mp4"
+    video.write_bytes(b"video")
+    work = folder / "error.analysis"
+    work.mkdir()
+    source = {"language": "en", "segments": [{"start": 0, "end": 1, "text": "original words"}]}
+    (work / "transcript.json").write_text(json.dumps(source), encoding="utf-8")
+    class ErrorClient:
+        def correct(self, **kwargs: Any) -> Any:
+            raise RuntimeError("provider unavailable")
+    result = run_correction(video, client_factory=lambda **kwargs: ErrorClient(), api_key="fake", locality="local")
+    output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
+    return result == 0 and output["segments"][0]["corrected_text"] == "original words" and output["segments"][0]["status"] == "fallback_provider_error"
+
+
+def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
+    from correct_transcript import run_correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-local-key-")
+    video = folder / "local.mp4"
+    video.write_bytes(b"video")
+    work = folder / "local.analysis"
+    work.mkdir()
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [{"start": 0, "end": 1, "text": "same words"}]}), encoding="utf-8")
+    observed = {}
+    class FakeClient:
+        def correct(self, **kwargs: Any) -> Any:
+            return {"text": "1\tsame words"}
+    def factory(**kwargs: Any) -> FakeClient:
+        observed.update(kwargs)
+        return FakeClient()
+    result = run_correction(video, client_factory=factory, locality="local", base_url="http://127.0.0.1/v1",
+                            environ={"VIDEO_ANALYSIS_AI_LOCALITY": "local"})
+    output = (work / "manifest.json").read_text(encoding="utf-8")
+    return result == 0 and observed.get("api_key") == "local-no-key" and "local-no-key" not in output
 
 
 def check_real_ocr_smoke() -> tuple[bool, str]:
@@ -1233,6 +1438,24 @@ def main() -> int:
             "correction guard rejects paraphrase and omission", check_correction_guards)
         checks["correction refusal and malformed chunks keep originals"] = run_check(
             "correction refusal and malformed chunks keep originals", check_correction_safe_fallbacks)
+        checks["correction DRY shared source and speech helpers"] = run_check(
+            "correction DRY shared source and speech helpers", check_correction_shared_helpers_and_speech_reader)
+        checks["correction consent matrix blocks before provider call"] = run_check(
+            "correction consent matrix blocks before provider call", check_correction_consent_matrix_blocks_before_provider_call)
+        checks["correction skip modes stay offline"] = run_check(
+            "correction skip modes stay offline", check_correction_skip_modes_stay_offline)
+        checks["manual subtitles skip correction unchanged"] = run_check(
+            "manual subtitles skip correction unchanged", check_manual_subtitles_skip_correction_unchanged)
+        checks["correction resume and conflict are safe"] = run_check(
+            "correction resume and conflict are safe", check_correction_resume_and_conflict_are_safe)
+        checks["correction fake client writes validated output"] = run_check(
+            "correction fake client writes validated output", check_correction_fake_client_writes_validated_output)
+        checks["correction calls are bounded and usage is recorded"] = run_check(
+            "correction calls are bounded and usage is recorded", check_correction_calls_bounded_and_usage_recorded)
+        checks["correction provider errors fall back per chunk"] = run_check(
+            "correction provider errors fall back per chunk", check_correction_provider_errors_fall_back_per_chunk)
+        checks["correction local endpoint runs without API key"] = run_check(
+            "correction local endpoint runs without API key", check_local_endpoint_without_api_key_uses_placeholder)
         real_ocr_ok, real_ocr_status = check_real_ocr_smoke()
         checks["real OCR smoke"] = real_ocr_ok
         CHECK_OUTPUTS["real OCR smoke"] = real_ocr_status
