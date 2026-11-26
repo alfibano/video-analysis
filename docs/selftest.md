@@ -2,7 +2,8 @@
 
 `video-analysis/scripts/selftest.py` checks the skill without a real video. The project has no
 pytest dependency: this script **is** its test suite. Its default run never imports `yt_dlp` or
-opens a network connection; a real URL run is explicit with `--network URL`.
+opens a network connection or calls an AI provider; correction coverage uses injected fake clients.
+A real URL run is explicit with `--network URL`. The default self-test makes zero provider calls.
 
 ## What it does
 
@@ -57,6 +58,26 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | temporary folders live in the app _temp folder | test runs use the skill's `_temp` folder or `VIDEO_ANALYSIS_TEMP_DIR`, and scripts centralize temporary folder creation |
 | default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
 | documentation contract current | usage docs mention fetch, tool checks, network self-test and `frames.json` |
+| manifest records local and URL source kinds | media provenance is explicit before consent evaluation |
+| extract preserves correction manifest state | extraction keeps correction settings and stage records |
+| correction contract parses exact numbered lines | response IDs are complete, unique, and have no extra prose |
+| correction guard rejects paraphrase and omission | unsafe edits keep the original text |
+| correction refusal and malformed chunks keep originals | refusal and malformed output safely fall back |
+| correction DRY shared source and speech helpers | correction and bundle use the same source selection and normalization |
+| correction consent matrix blocks before provider call | remote correction for local media requires consent; URL and declared local endpoints do not |
+| correction skip modes stay offline | opt-out and missing remote API key skip without constructing a provider |
+| manual subtitles skip correction unchanged | manual captions retain precedence and are not modified |
+| correction resume and conflict are safe | matching results resume; changed settings exit 3 |
+| correction fake client writes validated output | fake responses write the versioned corrected transcript and usage |
+| correction calls are bounded and usage is recorded | at most two requests run at once and token totals are recorded |
+| correction provider errors fall back per chunk | provider failures preserve originals and report the error type |
+| correction local endpoint runs without API key | declared local endpoint receives a fixed placeholder key |
+| bundle uses matching corrected speech provenance | a matching correction is selected and provenance is recorded |
+| bundle ignores stale corrected speech | mismatched corrections fall back to original speech |
+| bundle resume keys selected speech input | changed corrected speech input conflicts with bundle resume |
+| setup reports correction readiness without secrets | setup reports SDK/key readiness without exposing key values |
+| analyze_video correction order and flags | the pipeline runs correction in order and forwards its options |
+| documentation contract current | README and skill disclose correction data flow, consent, flags, host locality, and release state |
 | every script help describes itself | each command's help has valid sections, usage detail and exit codes |
 | *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
 | *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
@@ -80,8 +101,9 @@ python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where t
 python video-analysis/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
 ```
 
-The default suite uses a fake OCR engine for orchestration and runs a real OCR smoke when RapidOCR
-is installed. That smoke reports `SKIP` when the package is unavailable; it does not fail the suite.
+The default suite uses fake OCR and correction clients for orchestration and runs a real OCR smoke
+when RapidOCR is installed. It makes zero provider calls. The OCR smoke reports `SKIP` when the
+package is unavailable; it does not fail the suite.
 
 Exit code `0` = every check passed, `1` = at least one failed.
 Network mode writes its download under `<work-dir>/network` (or the fresh test folder).

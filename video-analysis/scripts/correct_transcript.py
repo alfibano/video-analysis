@@ -20,6 +20,8 @@ SYSTEM_PROMPT = (
     "Keep the speaker's wording, register and language. Do not rephrase, summarize, translate, add or remove content. "
     "Output exactly one line per input line, same numbers, format: <number><TAB><corrected text>. No other text."
 )
+SEGMENT_STATUSES = frozenset({"unchanged", "corrected", "rejected_edit_ratio", "rejected_length_ratio",
+                              "fallback_refusal", "fallback_malformed", "fallback_provider_error"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,39 @@ class CorrectionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class CorrectionRequest:
+    language: str = "auto"
+    model: str | None = None
+    base_url: str | None = None
+    locality: str | None = None
+    allow_remote_ai: bool = False
+    no_correct: bool = False
+    api_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionDeps:
+    environ: Mapping[str, str]
+    client_factory: Callable[..., Any] | None = None
+    interactive: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSelectionInputs:
+    transcript: Any
+    raw_info: Mapping[str, Any]
+    metadata: Mapping[str, Any]
+    language: str
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionResult:
+    rows: Sequence[CorrectedSegment]
+    usage: dict[str, int]
+    chunk_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class CorrectionStage:
     video: Path
     work: Path
@@ -98,7 +133,8 @@ def _load_correction_stage(video: Path, work: Path, language: str,
         return None, 3
     source_kind = media_source_kind(manifest)
     manifest["source"] = {**identity, "kind": source_kind}
-    source, speech = _source_data(video, work, transcript, raw_info, metadata, language)
+    source, speech = _source_data(video, work, SourceSelectionInputs(
+        transcript, raw_info, metadata, language))
     source_file = Path(source.file).name if source.file else None
     source_value = {"kind": source.source, "language": source.language, "file": source_file}
     source_path = work / (source_file or "")
@@ -293,71 +329,98 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _source_data(video: Path, work: Path, transcript: Any, raw_info: Mapping[str, Any],
-                 metadata: Mapping[str, Any], language: str) -> tuple[Any, list[Any]]:
+def _source_data(video: Path, work: Path, inputs: SourceSelectionInputs) -> tuple[Any, list[Any]]:
     from bundle import read_speech_segments, select_speech_source
-    transcript_language = transcript.get("language") if isinstance(transcript, Mapping) else None
-    info = dict(raw_info)
-    info.setdefault("language", metadata.get("language"))
-    source = select_speech_source(language, info, [item for item in work.iterdir() if item.is_file()],
+    transcript_language = inputs.transcript.get("language") if isinstance(inputs.transcript, Mapping) else None
+    info = dict(inputs.raw_info)
+    info.setdefault("language", inputs.metadata.get("language"))
+    source = select_speech_source(inputs.language, info, [item for item in work.iterdir() if item.is_file()],
                                   transcript_language=transcript_language,
-                                  transcript_available=isinstance(transcript, Mapping)
-                                  and isinstance(transcript.get("segments"), list),
+                                  transcript_available=isinstance(inputs.transcript, Mapping)
+                                  and isinstance(inputs.transcript.get("segments"), list),
                                   video_stem=video.stem)
-    return source, read_speech_segments(source, work, transcript if isinstance(transcript, Mapping) else {})
+    return source, read_speech_segments(
+        source, work, inputs.transcript if isinstance(inputs.transcript, Mapping) else {})
 
 
-def _valid_output(path: Path, params: Mapping[str, Any], source: Any, segments: Sequence[Any]) -> bool:
+def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
+                              segments: Sequence[Any]) -> list[str] | None:
+    """Load corrected text only when its complete source and segment contract still matches."""
+    if source.source not in {"whisper", "automatic"}:
+        return None
     try:
-        output = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
+        output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
+        source_params = params["source"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(output, dict) or not isinstance(source_params, Mapping):
+        return None
+    source_file = Path(source.file or "").name
+    source_path = work / Path(source.file or "")
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return None
+    if (source_params.get("kind") != source.source or source_params.get("language") != source.language
+            or source_params.get("file") != source_file or source_params.get("size") != stat.st_size
+            or source_params.get("mtime_ns") != stat.st_mtime_ns):
+        return None
     expected_source = {key: params["source"][key] for key in ("kind", "language", "file")}
-    return (output.get("schema_version") == 1 and output.get("source") == expected_source
-            and output.get("model") == params["model"] and output.get("prompt_version") == PROMPT_VERSION
-            and isinstance(output.get("segments"), list) and len(output["segments"]) == len(segments)
-            and all(row.get("start") == item.start and row.get("end") == item.end
-                    and row.get("original_text") == item.text
-                    for row, item in zip(output["segments"], segments)))
+    rows = output.get("segments")
+    endpoint = {"base_url_identity": params.get("base_url_identity"),
+                "locality": params.get("locality")}
+    if (output.get("schema_version") != 1 or output.get("source") != expected_source
+            or output.get("model") != params.get("model") or output.get("endpoint") != endpoint
+            or output.get("prompt_version") != PROMPT_VERSION or not isinstance(rows, list)
+            or len(rows) != len(segments)):
+        return None
+    corrected: list[str] = []
+    for row, original in zip(rows, segments):
+        if (not isinstance(row, dict) or row.get("start") != original.start
+                or row.get("end") != original.end or row.get("original_text") != original.text
+                or not isinstance(row.get("corrected_text"), str)
+                or not row["corrected_text"].strip() or row.get("status") not in SEGMENT_STATUSES):
+            return None
+        corrected.append(row["corrected_text"])
+    return corrected
 
 
-def _resolve_settings(model: str | None, base_url: str | None, locality: str | None,
-                     allow_remote_ai: bool, no_correct: bool, api_key: str | None,
-                     environ: Mapping[str, str], interactive: bool | None) -> CorrectionSettings:
-    model = model or environ.get("VIDEO_ANALYSIS_CORRECT_MODEL") or "gpt-6-luna"
-    base_url = base_url or environ.get("OPENAI_BASE_URL") or None
-    locality = locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
-    api_key = api_key if api_key is not None else environ.get("OPENAI_API_KEY")
+def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> CorrectionSettings:
+    model = request.model or deps.environ.get("VIDEO_ANALYSIS_CORRECT_MODEL") or "gpt-6-luna"
+    base_url = request.base_url or deps.environ.get("OPENAI_BASE_URL") or None
+    locality = request.locality or deps.environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
+    api_key = request.api_key if request.api_key is not None else deps.environ.get("OPENAI_API_KEY")
     if not api_key and locality == "local" and base_url:
         api_key = "local-no-key"
-    return CorrectionSettings(model, base_url, locality, api_key, allow_remote_ai, no_correct, interactive)
+    return CorrectionSettings(model, base_url, locality, api_key, request.allow_remote_ai,
+                              request.no_correct, deps.interactive)
 
 
-def _resume_decision(stage: Mapping[str, Any], previous: Any, params: Mapping[str, Any],
-                     output_path: Path, source: Any, speech: Sequence[Any]) -> int | None:
-    if stage.get("status") != "done":
+def _resume_decision(state: CorrectionStage) -> int | None:
+    if state.stage.get("status") != "done":
         return None
-    if previous != params or not _valid_output(output_path, params, source, speech):
+    if (state.previous != state.params
+            or load_matching_correction(state.work, state.params, state.source, state.speech) is None):
         print("correction manifest conflict: completed output or settings changed", file=sys.stderr)
         return 3
     print("CORRECTION: resumed")
     return 0
 
 
-def _consent_decision(source_kind: str, locality: str, allow_remote_ai: bool,
-                      interactive: bool | None, stages: dict[str, Any], manifest: dict[str, Any],
-                      manifest_path: Path) -> tuple[dict[str, Any] | None, int | None]:
-    if not consent_required(source_kind, locality):
+def _consent_decision(state: CorrectionStage, settings: CorrectionSettings
+                      ) -> tuple[dict[str, Any] | None, int | None]:
+    manifest = state.manifest
+    if not consent_required(manifest["source"]["kind"], settings.locality):
         return None, None
-    if allow_remote_ai:
+    if settings.allow_remote_ai:
         return {"granted": True, "method": "flag"}, None
-    can_prompt = sys.stdin.isatty() if interactive is None else interactive
+    can_prompt = sys.stdin.isatty() if settings.interactive is None else settings.interactive
     accepted = (can_prompt and input(
         "Send transcript text and video context to the configured remote AI? [y/N] ").strip().casefold() == "y")
     if accepted:
         return {"granted": True, "method": "interactive"}, None
-    stages["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
-    _write_manifest(manifest_path, manifest)
+    manifest["stages"]["correct_transcript"] = {"status": "denied", "consent": {"granted": False}}
+    _write_manifest(state.work / "manifest.json", manifest)
     print("Remote AI consent is required for transcripts from local media; pass --allow-remote-ai.",
           file=sys.stderr)
     return None, 4
@@ -396,9 +459,8 @@ def _correct_chunks(client: Any, model: str, context: str,
 
 
 def _write_correction_result(state: CorrectionStage, settings: CorrectionSettings,
-                             consent: dict[str, Any] | None,
-                             rows: Sequence[CorrectedSegment], usage: dict[str, int],
-                             chunk_count: int) -> None:
+                             consent: dict[str, Any] | None, result: CorrectionResult) -> None:
+    rows = result.rows
     output = {"schema_version": 1,
               "source": {key: state.source_value[key] for key in ("kind", "language", "file")},
               "model": settings.model,
@@ -413,8 +475,8 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
     for item in rows:
         counts[item.status] = counts.get(item.status, 0) + 1
     stage: dict[str, Any] = {"status": "done", "output": state.output_path.name,
-                             "chunks": chunk_count, "segments": len(rows),
-                             "segment_statuses": counts, "usage": usage}
+                             "chunks": result.chunk_count, "segments": len(rows),
+                             "segment_statuses": counts, "usage": result.usage}
     if consent is not None:
         stage["consent"] = consent
     state.manifest["stages"]["correct_transcript"] = stage
@@ -424,29 +486,21 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
           f"fallback {sum(v for k, v in counts.items() if k.startswith('fallback_'))}")
 
 
-def run_correction(video: Path, *, language: str = "auto", model: str | None = None,
-                   base_url: str | None = None, locality: str | None = None,
-                   allow_remote_ai: bool = False, no_correct: bool = False,
-                   api_key: str | None = None, environ: Mapping[str, str] | None = None,
-                   client_factory: Callable[..., Any] | None = None,
-                   interactive: bool | None = None) -> int:
+def run_correction(video: Path, request: CorrectionRequest | None = None,
+                   deps: CorrectionDeps | None = None) -> int:
     """Select, authorize, run, and safely persist one correction stage."""
-    environ = os.environ if environ is None else environ
+    request = request or CorrectionRequest()
+    deps = deps or CorrectionDeps(os.environ)
     video = video.resolve()
     work = video.parent / f"{video.stem}.analysis"
-    settings = _resolve_settings(model, base_url, locality, allow_remote_ai, no_correct,
-                                 api_key, environ, interactive)
-    state, load_error = _load_correction_stage(video, work, language, settings)
+    settings = _resolve_settings(request, deps)
+    state, load_error = _load_correction_stage(video, work, request.language, settings)
     if state is None:
         return load_error or 1
     metadata, source, speech = state.metadata, state.source, state.speech
-    manifest, params = state.manifest, state.params
-    output_path = state.output_path
-    stage, previous = state.stage, state.previous
+    manifest = state.manifest
     stages = manifest["stages"]
-    model, base_url, locality, api_key = (settings.model, settings.base_url,
-                                           settings.locality, settings.api_key)
-    resumed = _resume_decision(stage, previous, params, output_path, source, speech)
+    resumed = _resume_decision(state)
     if resumed is not None:
         return resumed
     skip = correction_skip_reason(no_correct=settings.no_correct, source=source.source,
@@ -456,19 +510,18 @@ def run_correction(video: Path, *, language: str = "auto", model: str | None = N
         _write_manifest(work / "manifest.json", manifest)
         print(f"CORRECTION: skipped | {skip}")
         return 0
-    consent, consent_error = _consent_decision(manifest["source"]["kind"], settings.locality,
-                                               settings.allow_remote_ai,
-                                                settings.interactive, stages, manifest,
-                                                work / "manifest.json")
+    consent, consent_error = _consent_decision(state, settings)
     if consent_error is not None:
         return consent_error
-    factory = client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
-    client = factory(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=2)
+    factory = deps.client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
+    client = factory(api_key=settings.api_key, base_url=settings.base_url,
+                     timeout=120.0, max_retries=2)
     language_value = source.language or "unknown"
     chapter_titles = [str(item.get("title") or "") for item in metadata.get("chapters", []) if isinstance(item, Mapping)]
     context = build_context(metadata.get("title"), metadata.get("description"), language_value, chapter_titles)
-    corrected_rows, usage_totals, chunk_count = _correct_chunks(client, model, context, speech)
-    _write_correction_result(state, settings, consent, corrected_rows, usage_totals, chunk_count)
+    corrected_rows, usage_totals, chunk_count = _correct_chunks(client, settings.model, context, speech)
+    _write_correction_result(state, settings, consent,
+                             CorrectionResult(corrected_rows, usage_totals, chunk_count))
     return 0
 
 
@@ -493,9 +546,10 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as error:
         return 0 if error.code == 0 else 2
     try:
-        return run_correction(args.video, language=args.language, model=args.model, base_url=args.base_url,
-                              locality=args.ai_locality, allow_remote_ai=args.allow_remote_ai,
-                              no_correct=args.no_correct)
+        request = CorrectionRequest(language=args.language, model=args.model, base_url=args.base_url,
+                                    locality=args.ai_locality, allow_remote_ai=args.allow_remote_ai,
+                                    no_correct=args.no_correct)
+        return run_correction(args.video, request)
     except Exception as error:
         print(f"correction failed: {error}", file=sys.stderr)
         return 1

@@ -231,7 +231,7 @@ def _read_speech(inputs: BundleInputs, language: str) -> SpeechRead:
                                   video_stem=str(inputs.metadata.get("video_stem") or ""))
     segments = read_speech_segments(source, inputs.work, transcript)
     identity = _speech_identity(source, inputs.work)
-    corrected = _read_matching_correction(inputs, source, segments, identity)
+    corrected = _read_matching_correction(inputs, source, segments)
     if corrected is not None:
         stat = (inputs.work / "transcript.corrected.json").stat()
         return SpeechRead(corrected, source.language, "transcript.corrected.json", "corrected",
@@ -249,40 +249,15 @@ def _speech_identity(source: SpeechSource, work: Path) -> dict[str, int]:
 
 
 def _read_matching_correction(inputs: BundleInputs, source: SpeechSource,
-                              originals: list[SpeechSegment], identity: dict[str, int]
+                              originals: list[SpeechSegment]
                               ) -> list[SpeechSegment] | None:
-    if source.source not in {"whisper", "automatic"}:
-        return None
     params = inputs.manifest.get("params", {}).get("correct_transcript", {})
-    expected = {"kind": source.source, "language": source.language,
-                "file": Path(source.file or "").name, **identity}
-    if params.get("source") != expected:
+    from correct_transcript import load_matching_correction
+    corrected_texts = load_matching_correction(inputs.work, params, source, originals)
+    if corrected_texts is None:
         return None
-    try:
-        value = json.loads((inputs.work / "transcript.corrected.json").read_text(encoding="utf-8"))
-        rows = value.get("segments")
-        endpoint = {"base_url_identity": params.get("base_url_identity"),
-                    "locality": params.get("locality")}
-        if (value.get("schema_version") != 1 or value.get("source") != {
-                key: expected[key] for key in ("kind", "language", "file")}
-                or value.get("model") != params.get("model")
-                or value.get("endpoint") != endpoint
-                or not isinstance(value.get("prompt_version"), str)
-                or not isinstance(rows, list) or len(rows) != len(originals)):
-            return None
-        corrected = []
-        allowed_statuses = {"corrected", "unchanged", "rejected_edit_ratio", "rejected_length_ratio",
-                            "fallback_refusal", "fallback_malformed", "fallback_provider_error"}
-        for row, original in zip(rows, originals):
-            if (not isinstance(row, dict) or row.get("start") != original.start
-                    or row.get("end") != original.end or row.get("original_text") != original.text
-                    or not isinstance(row.get("corrected_text"), str)
-                    or not row["corrected_text"].strip() or row.get("status") not in allowed_statuses):
-                return None
-            corrected.append(SpeechSegment(original.start, original.end, row["corrected_text"]))
-        return corrected
-    except (OSError, ValueError, TypeError):
-        return None
+    return [SpeechSegment(original.start, original.end, text)
+            for original, text in zip(originals, corrected_texts)]
 
 
 def transient_key_frames(frames: dict[str, Any], keyframes: list[str],

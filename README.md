@@ -5,8 +5,23 @@ what is **seen** (sampled frames, timestamped contact sheets, screen changes, ex
 what is **said** (offline timestamped transcript), with a procedure to report both cross-referenced
 by timestamp — keeping what is on screen, what is said, and what is inferred apart.
 
-Local analysis works offline after a one-time model download. URL fetching is an explicit network
-step. No system ffmpeg or admin rights: tested on Windows 11 with Python 3.12.
+Local analysis works offline after a one-time model download. Transcript correction can send text
+to a configured AI service; see [Confidentiality](#confidentiality) before enabling it. URL fetching
+is an explicit network step. No system ffmpeg or admin rights: tested on Windows 11 with Python 3.12.
+
+## Confidentiality
+
+**Privacy warning: transcript correction sends what is said in the video to an AI service outside
+your PC, unless you declare a local AI. Do not use it on confidential recordings without consent.**
+
+With an API key, transcript correction sends transcript text plus the video's title, description,
+language, and chapter titles to the configured AI service (OpenAI by default), a third party outside
+your PC. Correction does not send video, audio, frames, OCR text, or the API key. For a local video,
+the tool asks before sending; if nobody can answer, it stops with exit 4 and requires
+`--allow-remote-ai` after consent. Fetched public URLs are not asked. An explicitly declared local
+AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALITY=local`) with a base URL is not asked and
+needs no API key. Declaring local is a trust statement: a localhost proxy may still forward data
+online. Use `--no-correct` or omit the API key to keep correction fully offline.
 
 **About the Whisper model.** The transcript is produced by Whisper, OpenAI's open speech-recognition
 AI, run locally through `faster-whisper`. Its *model* is the trained-knowledge file the program needs:
@@ -43,7 +58,7 @@ a real fetch and extraction (`python video-analysis/scripts/selftest.py --networ
 - `setup_tools.py --check` runs only the offline self-test: no install, readiness report, or model
   cache check.
 - `analyze_video.py <url-or-path>` fetches a URL if needed, then extracts and builds the bundle.
-  It prints `STEP fetch`, `STEP extract`, or `STEP bundle` on stderr, stops at the first failed
+  It prints `STEP fetch`, `STEP extract`, `STEP correct`, or `STEP bundle` on stderr, stops at the first failed
   step with that step's exit code, and accepts `--sub-langs` only with a URL.
 
 Fetch progress and `OCR n/N` progress are bounded and printed on stderr.
@@ -58,8 +73,8 @@ python video-analysis/scripts/analyze_video.py "https://www.youtube.com/watch?v=
 python video-analysis/scripts/analyze_video.py "<folder>/talk.mp4" --language fr
 ```
 
-With a URL, three steps run in order; with a local file, the first one is skipped. Each step
-announces itself on stderr (`STEP fetch`, `STEP extract`, `STEP bundle`), and the command stops at
+With a URL, four steps run in order; with a local file, fetch is skipped. Each step
+announces itself on stderr (`STEP fetch`, `STEP extract`, `STEP correct`, `STEP bundle`), and the command stops at
 the first failed step with that step's exit code. Everything except the downloaded video lands in
 one working folder next to the video, `<video folder>/<video name>.analysis/`, so it can be deleted
 in one go when you are done; the scripts never delete anything. Measured on a 23-minute talk:
@@ -67,8 +82,8 @@ in one go when you are done; the scripts never delete anything. Measured on a 23
 
 ### `STEP fetch` — download (URL only)
 
-One non-live video; playlists and live or upcoming streams are refused before any download. This is
-the only step that uses the network. Progress is bounded.
+One non-live video; playlists and live or upcoming streams are refused before any download. This step
+downloads one public video. Progress is bounded.
 
 | Output | Content |
 |---|---|
@@ -91,6 +106,18 @@ the only step that uses the network. Progress is bounded.
 | `at/` | Full-resolution frames at exact instants, `--at HH:MM:SS[.mmm]` (repeatable). |
 | `manifest.json` | Updated with the extraction settings and stage status. |
 
+### `STEP correct` — transcript correction (optional AI service)
+
+When `OPENAI_API_KEY` is set, the selected automatic captions or Whisper transcript can be corrected
+in bounded chunks. The original transcript and caption files are never changed. `--no-correct`
+records a skip; without a key correction is skipped. See [Confidentiality](#confidentiality) for
+what leaves the PC and local-video consent.
+
+| Output | Content |
+|---|---|
+| `transcript.corrected.json` | Corrected text beside each original segment, with source, model, endpoint locality, and per-segment status. Manual subtitles retain precedence and are not corrected. |
+| `manifest.json` | Correction parameters and stage status, consent method when needed, segment status counts, and token usage. |
+
 ### `STEP bundle` — the reading summary (offline)
 
 | Output | Content |
@@ -111,7 +138,11 @@ Read `bundle.json` first when present.
 
 Running the same command again resumes: finished stages are skipped. Changed settings or a
 different video are refused (exit 3) instead of mixing outputs; exit 1 is a processing failure,
-exit 2 bad input. Each step also exists as its own script — `fetch_video.py`, `extract_video.py`,
+exit 2 bad input, and exit 4 means local-video consent for remote AI is required. Options include
+`--correct-model` (separate from Whisper's `--model`), `--base-url`, `--ai-locality local|remote`,
+`--allow-remote-ai` (use only after consent), and `--no-correct`. Correction also reads
+`VIDEO_ANALYSIS_CORRECT_MODEL`, `OPENAI_BASE_URL`, and `VIDEO_ANALYSIS_AI_LOCALITY`. Each step also
+exists as its own script — `fetch_video.py`, `extract_video.py`, `correct_transcript.py`,
 `build_bundle.py` — to rerun one step alone, for example
 `extract_video.py "<video>" --at 00:05:40` with the same options as the first run. All options:
 [`video-analysis/SKILL.md`](video-analysis/SKILL.md).
@@ -123,7 +154,7 @@ Analysis outputs stay in `<video>.analysis/` next to the video.
 
 ## Status
 
-v0.2.1 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
+v0.3.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License
 

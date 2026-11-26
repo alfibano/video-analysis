@@ -1,6 +1,6 @@
 ---
 name: video-analysis
-description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Works fully offline on Windows without system ffmpeg.
+description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Local extraction works offline on Windows without system ffmpeg; transcript correction can use a configured AI service.
 ---
 
 # Video analysis — what is seen, what is said
@@ -8,6 +8,20 @@ description: Analyse a local video file or one online video URL - what is SEEN (
 You have **no direct video or audio input**. You read **images extracted from the video** and a
 **transcript of its audio**. Everything below turns a video into those two things, then tells you
 how to read them without overclaiming.
+
+## Confidentiality
+
+**Privacy warning: transcript correction sends what is said in the video to an AI service outside
+your PC, unless you declare a local AI. Do not use it on confidential recordings without consent.**
+
+With an API key, transcript correction sends transcript text plus the video's title, description,
+language, and chapter titles to the configured AI service (OpenAI by default), a third party outside
+the PC. Correction does not send video, audio, frames, OCR text, or the API key. For local media,
+ask the user before running correction with remote AI and pass `--allow-remote-ai` only after a yes.
+If the command exits 4, ask and rerun only after consent. Fetched public URLs are not asked. An
+explicitly declared local AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALITY=local`) with a
+base URL is not asked and needs no API key. Declaring local is a trust statement: a localhost proxy
+may still forward data online. Use `--no-correct` or no API key to keep correction fully offline.
 
 ## Where things go — the owner's hard rule
 
@@ -30,7 +44,7 @@ Analysis outputs remain in `<video>.analysis/` next to the video.
 - `setup_tools.py --check` runs only the offline self-test: no install, readiness report, or model
   cache check.
 - `analyze_video.py <url-or-path>` fetches a URL if needed, then extracts and builds the bundle.
-  It prints `STEP fetch`, `STEP extract`, or `STEP bundle` on stderr, stops at the first failed
+  It prints `STEP fetch`, `STEP extract`, `STEP correct`, or `STEP bundle` on stderr, stops at the first failed
   step with that step's exit code, and accepts `--sub-langs` only with a URL.
 
 Fetch progress and `OCR n/N` progress are bounded and printed on stderr.
@@ -42,14 +56,15 @@ python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # offlin
 python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
 ```
 Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
-`faster-whisper`, `rapidocr`, `yt-dlp[default]`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
+`faster-whisper`, `rapidocr`, `yt-dlp[default]`, `openai`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
 system ffmpeg is found; then caches the Whisper `small` model and warms OCR once so its model downloads
 during setup. Tool resolution: environment override
 (`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
 JavaScript runtime (Deno, else Node). Normal setup prints `READY` only after setup and the offline
 self-test both succeed. `--check` runs only the offline self-test: it does not install tools, report
 readiness, or check the model cache.
-Network is used only by setup and by `fetch_video.py`; local analysis is offline.
+Setup may download tools and models; fetch downloads the requested public video; correction may send
+transcript text and context to the configured AI service as described in Confidentiality.
 
 Whisper model: Whisper is OpenAI's open speech-recognition AI, run locally via `faster-whisper`; the
 *model* is its trained-knowledge file, downloaded once into the Hugging Face cache — afterwards the
@@ -85,8 +100,16 @@ For a local video, or after fetching a URL, extract frames and transcript:
 
 ```bash
 python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" --language fr
+python ~/.claude/skills/video-analysis/scripts/correct_transcript.py "<video path>" --language fr
 python ~/.claude/skills/video-analysis/scripts/build_bundle.py "<video path>" --language fr
 ```
+For a local video using remote AI, ask before running the correction command above. If it exits 4,
+ask the user and rerun with `--allow-remote-ai` only after a yes. `analyze_video.py` runs
+`fetch → extract → correct → bundle`; its `--no-correct` option records an intentional skip. The
+corrector accepts `--correct-model` through the pipeline (`--model` remains Whisper's model),
+`--base-url`, and `--ai-locality local|remote`. It writes `transcript.corrected.json` without
+changing original transcript or caption files. Changed correction settings or source are refused
+with exit 3.
 Run it in the **background** for videos longer than a few minutes: transcription runs ~5x faster
 than real time on CPU (a 15 min video takes ~3 min). Options: `--interval 5` (seconds between
 frames; use 2 for fast-moving screens, 10-15 for talking heads), `--model small` (`medium` = better,
@@ -129,6 +152,12 @@ d. **Zoom where the speech points**: when the speaker says "here", "this candle"
    check refuses with exit 3), then read that full-resolution frame. Sheets are 640 px per cell —
    too small for chart labels or small text.
 e. Write the analysis (step 4).
+
+### Step-4 host locality contract
+
+The host model locality is `VIDEO_ANALYSIS_HOST_AI=local|remote`, defaulting to `remote`. Before
+writing a study sheet from local media with a remote host model, ask the user for consent. A URL
+video or an explicitly local host model needs no confirmation.
 
 ## 4. Report — keep three things apart
 

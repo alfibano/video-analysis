@@ -1,5 +1,34 @@
 # Release notes — video-analysis
 
+## v0.3.0 — 2026-11-26 — transcript correction
+
+### Added
+- `correct_transcript.py` corrects selected automatic-caption or Whisper speech in bounded chunks,
+  records segment statuses and token usage, and preserves every original transcript and caption file.
+- `analyze_video.py` runs `fetch → extract → correct → bundle`; correction can use OpenAI or a
+  compatible configured endpoint, including an explicitly declared local endpoint.
+- Local media requires consent before correction sends transcript text and video context to remote
+  AI. A refusal stops with exit 4 before a provider call; `--no-correct` skips correction.
+- Bundles use only corrected speech whose source and segment content still match, and record its
+  provenance. Bundle resume detects a changed selected speech input.
+
+### Changed
+- `setup_tools.py` installs and reports the OpenAI SDK and reports API-key presence without
+  printing the key. A missing key skips remote correction without failing setup.
+- For local media, remote correction sends transcript text, title, description, language, and chapter
+  titles to the configured service. It does not send video, audio, frames, OCR text, or the key.
+- Migration: bundles built by v0.2.x are refused with exit 3 once correction changes the speech
+  input. Send that bundle's `bundle.json` to the Recycle Bin and rerun.
+
+### Documentation
+- README and the skill document confidentiality, correction options, consent, locality declarations,
+  corrected output, and the future step-4 host locality contract.
+- Self-test documentation lists correction, provenance, readiness, and privacy contract checks; the
+  default self-test makes zero provider calls.
+
+### Measured
+- Self-test: default 69/69; `--full` 71/71.
+
 ## v0.2.1 — 2026-11-26 — SponsorBlock fix
 ### Fixed
 - `build_bundle.py` no longer crashes when `sponsorblock.json` lists segments: SponsorBlock spans are normalized before chapters are built. Before, any video with sponsor, intro or other SponsorBlock segments failed at `STEP bundle`.

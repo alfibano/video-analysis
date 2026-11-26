@@ -1,6 +1,6 @@
 # Platform evolution — design and delivery plan
 
-Status: **steps 1 and 2 implemented; scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-24).
+Status: **steps 1 and 2 implemented; step 3 implemented (transcript correction); scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-26).
 
 ## Step 2 — aligned bundle
 

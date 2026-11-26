@@ -335,12 +335,26 @@ def check_network_fetch(url: str, folder: Path) -> bool:
 def check_documentation_contract() -> bool:
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
+    selftest_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
+    platform_plan = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
+    release_notes = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     required = ("fetch_video.py", "analyze_video.py", "setup_tools.py --check",
                 "selftest.py --network", "frames.json", "build_bundle.py", "bundle.json",
                 "--fixed-interval", "relative to the `.analysis` folder")
+    correction_contract = ("## Confidentiality", "STEP correct", "transcript.corrected.json",
+                          "--correct-model", "--base-url", "--ai-locality", "--allow-remote-ai",
+                          "--no-correct", "exit 4", "VIDEO_ANALYSIS_HOST_AI",
+                          "zero provider calls", "v0.3.0", "Recycle Bin")
     return (all(phrase in skill and phrase in readme for phrase in required)
             and "Secondary tools" in skill
-            and "analyse cette vidéo" in skill and "trash" in skill)
+            and "analyse cette vidéo" in skill and "trash" in skill
+            and all(phrase in skill and phrase in readme for phrase in correction_contract[:5])
+            and all(flag in readme for flag in correction_contract[5:8])
+            and "exit 4" in readme and "VIDEO_ANALYSIS_HOST_AI" in skill
+            and "zero provider calls" in selftest_docs
+            and "step 3 implemented" in platform_plan.lower()
+            and "v0.3.0 — 2026-11-26 — transcript correction" in release_notes
+            and "Recycle Bin" in release_notes)
 
 
 def check_script_help_contract() -> bool:
@@ -1162,6 +1176,18 @@ def check_correction_consent_matrix() -> bool:
             and not consent_required("local", "local"))
 
 
+def call_correction(video: Path, **options: Any) -> int:
+    from correct_transcript import CorrectionDeps, CorrectionRequest, run_correction
+    request_fields = {"language", "model", "base_url", "locality", "allow_remote_ai",
+                      "no_correct", "api_key"}
+    request = CorrectionRequest(**{key: options.pop(key) for key in list(options) if key in request_fields})
+    deps = CorrectionDeps(options.pop("environ", __import__("os").environ),
+                          options.pop("client_factory", None), options.pop("interactive", None))
+    if options:
+        raise TypeError(f"unknown correction test options: {', '.join(options)}")
+    return run_correction(video, request, deps)
+
+
 def check_correction_skip_modes() -> bool:
     from correct_transcript import correction_skip_reason
     return (correction_skip_reason(no_correct=True, source="whisper", api_key=None) == "disabled"
@@ -1170,7 +1196,6 @@ def check_correction_skip_modes() -> bool:
 
 
 def check_correction_consent_matrix_blocks_before_provider_call() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-consent-")
     video = folder / "local.mp4"
@@ -1184,20 +1209,19 @@ def check_correction_consent_matrix_blocks_before_provider_call() -> bool:
     class NeverClient:
         def correct(self, *args: Any, **kwargs: Any) -> Any:
             raise AssertionError("provider called before consent")
-    result = run_correction(video, client_factory=lambda **kwargs: NeverClient(), environ={
+    result = call_correction(video, client_factory=lambda **kwargs: NeverClient(), environ={
         "OPENAI_API_KEY": "fake", "VIDEO_ANALYSIS_AI_LOCALITY": "remote"}, allow_remote_ai=False,
         interactive=False)
     class AllowedClient:
         def correct(self, **kwargs: Any) -> Any:
             return {"text": "1\tBonjour."}
-    allowed = run_correction(video, client_factory=lambda **kwargs: AllowedClient(), api_key="fake",
+    allowed = call_correction(video, client_factory=lambda **kwargs: AllowedClient(), api_key="fake",
                              locality="remote", allow_remote_ai=True)
     stage = json.loads((work / "manifest.json").read_text(encoding="utf-8"))["stages"]["correct_transcript"]
     return result == 4 and allowed == 0 and stage.get("consent") == {"granted": True, "method": "flag"}
 
 
 def check_correction_skip_modes_stay_offline() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-skip-")
     video = folder / "skip.mp4"
@@ -1206,16 +1230,15 @@ def check_correction_skip_modes_stay_offline() -> bool:
     class NeverClient:
         def __call__(self, **kwargs: Any) -> Any:
             raise AssertionError("provider constructed for a skipped correction")
-    disabled = run_correction(video, client_factory=NeverClient(), no_correct=True)
+    disabled = call_correction(video, client_factory=NeverClient(), no_correct=True)
     (folder / "skip.analysis" / "transcript.json").write_text(json.dumps({"language": "en",
         "segments": [{"start": 0, "end": 1, "text": "offline"}]}), encoding="utf-8")
-    missing_key = run_correction(video, client_factory=NeverClient(), environ={}, locality="remote")
+    missing_key = call_correction(video, client_factory=NeverClient(), environ={}, locality="remote")
     stage = json.loads((folder / "skip.analysis" / "manifest.json").read_text(encoding="utf-8"))["stages"]["correct_transcript"]
     return disabled == 0 and missing_key == 0 and stage.get("reason") == "no API key"
 
 
 def check_manual_subtitles_skip_correction_unchanged() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-manual-")
     video = folder / "manual.mp4"
@@ -1226,13 +1249,12 @@ def check_manual_subtitles_skip_correction_unchanged() -> bool:
     (work / "manual.fr.vtt").write_text(original, encoding="utf-8")
     (work / "raw_info.json").write_text(json.dumps({"language": "fr", "subtitles": {"fr": [{}]}}), encoding="utf-8")
     (work / "transcript.json").write_text(json.dumps({"language": "fr", "segments": []}), encoding="utf-8")
-    result = run_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
+    result = call_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
         AssertionError("manual subtitles must not call provider")), api_key="fake", locality="local")
     return result == 0 and (work / "manual.fr.vtt").read_text(encoding="utf-8") == original
 
 
 def check_correction_resume_and_conflict_are_safe() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-resume-")
     video = folder / "resume.mp4"
@@ -1244,16 +1266,15 @@ def check_correction_resume_and_conflict_are_safe() -> bool:
         def correct(self, **kwargs: Any) -> Any:
             return {"text": "1\tBonjour."}
     options = {"api_key": "fake", "locality": "local"}
-    first = run_correction(video, client_factory=lambda **kwargs: FakeClient(), **options)
-    second = run_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
+    first = call_correction(video, client_factory=lambda **kwargs: FakeClient(), **options)
+    second = call_correction(video, client_factory=lambda **kwargs: (_ for _ in ()).throw(
         AssertionError("completed correction was not resumed")), **options)
-    changed = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake",
+    changed = call_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake",
                              locality="local", model="different")
     return first == 0 and second == 0 and changed == 3
 
 
 def check_correction_fake_client_writes_validated_output() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-output-")
     video = folder / "output.mp4"
@@ -1267,7 +1288,7 @@ def check_correction_fake_client_writes_validated_output() -> bool:
             return {"text": "1\tBonjour, monde." , "usage": {"prompt_tokens": 8,
                     "prompt_tokens_details": {"cached_tokens": 2}, "completion_tokens": 3,
                     "completion_tokens_details": {"reasoning_tokens": 1}, "total_tokens": 11}}
-    result = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
+    result = call_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
     output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     usage = manifest["stages"]["correct_transcript"]["usage"]
@@ -1277,7 +1298,6 @@ def check_correction_fake_client_writes_validated_output() -> bool:
 
 
 def check_correction_calls_bounded_and_usage_recorded() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     import threading
     folder = make_temp_folder("correction-concurrency-")
@@ -1303,14 +1323,13 @@ def check_correction_calls_bounded_and_usage_recorded() -> bool:
             finally:
                 with lock:
                     active -= 1
-    result = run_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
+    result = call_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake", locality="local")
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     usage = manifest["stages"]["correct_transcript"]["usage"]
     return result == 0 and manifest["stages"]["correct_transcript"]["chunks"] == 3 and maximum <= 2 and usage["total_tokens"] == 9
 
 
 def check_correction_provider_errors_fall_back_per_chunk() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-fallback-")
     video = folder / "error.mp4"
@@ -1324,7 +1343,7 @@ def check_correction_provider_errors_fall_back_per_chunk() -> bool:
             raise RuntimeError("provider unavailable")
     error_output = io.StringIO()
     with contextlib.redirect_stderr(error_output):
-        result = run_correction(video, client_factory=lambda **kwargs: ErrorClient(), api_key="fake", locality="local")
+        result = call_correction(video, client_factory=lambda **kwargs: ErrorClient(), api_key="fake", locality="local")
     output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
     return (result == 0 and output["segments"][0]["corrected_text"] == "original words"
             and output["segments"][0]["status"] == "fallback_provider_error"
@@ -1332,7 +1351,6 @@ def check_correction_provider_errors_fall_back_per_chunk() -> bool:
 
 
 def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
-    from correct_transcript import run_correction
     from tools import make_temp_folder
     folder = make_temp_folder("correction-local-key-")
     video = folder / "local.mp4"
@@ -1347,7 +1365,7 @@ def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
     def factory(**kwargs: Any) -> FakeClient:
         observed.update(kwargs)
         return FakeClient()
-    result = run_correction(video, client_factory=factory, locality="local", base_url="http://127.0.0.1/v1",
+    result = call_correction(video, client_factory=factory, locality="local", base_url="http://127.0.0.1/v1",
                             environ={"VIDEO_ANALYSIS_AI_LOCALITY": "local"})
     output = (work / "manifest.json").read_text(encoding="utf-8")
     return result == 0 and observed.get("api_key") == "local-no-key" and "local-no-key" not in output
