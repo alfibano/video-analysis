@@ -336,8 +336,9 @@ def check_documentation_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     required = ("fetch_video.py", "analyze_video.py", "setup_tools.py --check",
                 "selftest.py --network", "frames.json", "build_bundle.py", "bundle.json",
-                "Secondary tools", "--fixed-interval", "relative to the `.analysis` folder")
-    return (all(all(phrase in text for phrase in required) for text in (skill, readme))
+                "--fixed-interval", "relative to the `.analysis` folder")
+    return (all(phrase in skill and phrase in readme for phrase in required)
+            and "Secondary tools" in skill
             and "analyse cette vidéo" in skill and "trash" in skill)
 
 
@@ -905,6 +906,45 @@ def check_bundle_without_fetch() -> bool:
     return bundle["speech"]["source"] == "none" and refusal.returncode == 3
 
 
+def check_bundle_cli_sponsorblock_segments() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("bundle-sponsorblock-")
+    video = folder / "lecture.mp4"
+    video.write_bytes(b"identity only")
+    work = folder / "lecture.analysis"
+    work.mkdir()
+    (work / "metadata.json").write_text(json.dumps({"duration": 30}), encoding="utf-8")
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 19, "end": 22, "text": "sponsored speech"},
+        {"start": 25, "end": 27, "text": "ordinary speech"}]}), encoding="utf-8")
+    (work / "frames.json").write_text(json.dumps({"f000020.jpg": 20}), encoding="utf-8")
+    (work / "sponsorblock.json").write_text(json.dumps([
+        {"start_time": 0, "end_time": 17.9, "category": "intro",
+         "title": "Intermission/Intro Animation", "type": "skip",
+         "_categories": [["intro", 0, 17.9, "Intermission/Intro Animation"]]},
+        {"start_time": 18.5, "end_time": 24.8, "category": "sponsor",
+         "title": "Sponsor", "type": "skip",
+         "_categories": [["sponsor", 18.5, 24.8, "Sponsor"]]}]), encoding="utf-8")
+    stat = video.stat()
+    (work / "manifest.json").write_text(json.dumps({"schema_version": 2,
+        "source": {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+        "params": {"fetch": {}, "extract": {"interval": 5}}, "stages": {}}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(HERE / "build_bundle.py"), str(video), "--skip-ocr"],
+                            capture_output=True, text=True, check=False)
+    CHILD_OUTPUT.append(result.stdout + result.stderr)
+    if result.returncode != 0:
+        CHECK_OUTPUTS["bundle CLI handles SponsorBlock segments"] = result.stdout + result.stderr
+        return False
+    bundle = json.loads((work / "bundle.json").read_text(encoding="utf-8"))
+    chapter = bundle["chapters"][0]
+    segments = chapter["speech_segments"]
+    return (segments[0]["is_sponsor"] and not segments[1]["is_sponsor"]
+            and chapter["frames"][0]["is_sponsor"]
+            and chapter["sponsor_overlap"]
+            and "sponsored speech" not in chapter["speech_text"]
+            and "ordinary speech" in chapter["speech_text"])
+
+
 def check_bundle_manual_subtitle() -> bool:
     from tools import make_temp_folder
     folder = make_temp_folder("bundle-manual-subtitle-")
@@ -1105,6 +1145,8 @@ def main() -> int:
         checks["fetch progress is bounded by output mode"] = run_check(
             "fetch progress is bounded by output mode", check_fetch_progress_policy)
         checks["bundle works without fetch outputs"] = run_check("bundle works without fetch outputs", check_bundle_without_fetch)
+        checks["bundle CLI handles SponsorBlock segments"] = run_check(
+            "bundle CLI handles SponsorBlock segments", check_bundle_cli_sponsorblock_segments)
         checks["bundle with fake fetch outputs prefers manual subtitles"] = run_check(
             "bundle with fake fetch outputs prefers manual subtitles", check_bundle_manual_subtitle)
         checks["extract preserves bundle manifest params"] = run_check(

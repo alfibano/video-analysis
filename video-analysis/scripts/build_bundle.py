@@ -168,8 +168,10 @@ def _load_inputs(video: Path) -> BundleInputs:
         raise BundleInputError("duration missing from analysis metadata")
     metadata.setdefault("duration", duration)
     metadata.update(video=str(video), video_stem=video.stem)
+    sponsor_values = _json(work / "sponsorblock.json", [])
+    sponsors = parse_sponsors(sponsor_values) if isinstance(sponsor_values, list) else []
     return BundleInputs(video, work, metadata, raw_info, transcript, frames, keyframes,
-                        _json(work / "sponsorblock.json", []), manifest, identity,
+                        sponsors, manifest, identity,
                         duration, interval)
 
 

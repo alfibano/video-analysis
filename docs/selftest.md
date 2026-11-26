@@ -30,6 +30,7 @@ opens a network connection; a real URL run is explicit with `--network URL`.
 | downloaded video names are short and safe | title and ID produce an ASCII stem no longer than 60 characters |
 | chapter source precedence and bounds | metadata chapters and fallback chapters follow the configured duration limits |
 | bundle works without fetch outputs | local extraction data is sufficient when fetch metadata and captions are absent |
+| bundle CLI handles SponsorBlock segments | yt-dlp SponsorBlock records become sponsor flags on overlapping speech and frames, appear in chapter overlap, and are excluded from summary-ready speech |
 | bundle with fake fetch outputs prefers manual subtitles | manual language captions take priority over automatic captions |
 | subtitle priority and rolling VTT dedupe | subtitle sources are ordered and repeated rolling-window cues are deduplicated |
 | srt and vtt normalize to segments | both subtitle formats produce normalized timed speech segments |
