@@ -39,7 +39,7 @@ def _selection(host, model: str, locality: str) -> None:
     print(f"AI selection: host={host.host} model={model} role=default reason={reason} locality={locality}")
 
 
-def _load_inputs(video: Path) -> tuple[Path, dict, dict, str]:
+def _load_inputs(video: Path) -> tuple[Path, dict, dict, str, dict, dict, list | None]:
     if not video.is_file():
         raise ValueError("video does not exist")
     analysis = video.parent / f"{video.stem}.analysis"
@@ -48,6 +48,10 @@ def _load_inputs(video: Path) -> tuple[Path, dict, dict, str]:
         raise ValueError("analysis folder, bundle.json, or manifest.json is missing")
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    metadata_path, raw_path, comments_path = analysis / "metadata.json", analysis / "raw_info.json", analysis / "comments.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+    raw_info = json.loads(raw_path.read_text(encoding="utf-8")) if raw_path.is_file() else {}
+    comments = json.loads(comments_path.read_text(encoding="utf-8")) if comments_path.is_file() else None
     if (not isinstance(bundle, dict) or not isinstance(manifest, dict)
             or manifest.get("schema_version") != 2
             or not isinstance(manifest.get("source"), dict)
@@ -59,7 +63,9 @@ def _load_inputs(video: Path) -> tuple[Path, dict, dict, str]:
         if child is not None and not isinstance(child, dict):
             raise ValueError("bundle or manifest is malformed")
     digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
-    return analysis, bundle, manifest, digest
+    if not isinstance(metadata, dict) or not isinstance(raw_info, dict) or (comments is not None and not isinstance(comments, list)):
+        raise ValueError("metadata, raw info, or comments are malformed")
+    return analysis, bundle, manifest, digest, metadata, raw_info, comments
 
 
 def _resolved_language(requested: str, bundle: dict) -> tuple[str, str]:
@@ -73,9 +79,10 @@ def _resolved_language(requested: str, bundle: dict) -> tuple[str, str]:
     return "auto", "auto (write in the speech language)"
 
 
-def _brief(analysis: Path, digest: str, params: dict) -> str:
-    from sheet_schema import SHEET_JSON_SCHEMA_V1
-    schema = json.dumps(SHEET_JSON_SCHEMA_V1, ensure_ascii=False, indent=2)
+def _brief(analysis: Path, digest: str, params: dict, facts: dict, comments: list | None) -> str:
+    from sheet_schema import SHEET_JSON_SCHEMA_V2
+    schema = json.dumps(SHEET_JSON_SCHEMA_V2, ensure_ascii=False, indent=2)
+    facts_json = json.dumps(facts, ensure_ascii=False, indent=2)
     language_instruction = (params["language"] if params["language"] != "auto"
                             else "auto; write in the speech language")
     return f"""# Study sheet writer brief
@@ -92,7 +99,16 @@ Locality: `{params['locality']}`
 Language: `{language_instruction}`
 Writer role: `default`
 
-Use the current host session default model. Preserve chapter ordering and times. Choose at most one telling frame per chapter. Distinguish on-screen evidence, speech, and inference. Use corrected speech only when its provenance is present in the bundle. Do not call a provider and do not delegate to a low-cost model.
+Use the current host session default model. Faithfully translate into the sheet language and never betray the author's message. Use author chapters or choose better boundaries and explain the choice. Summary paragraph count must be proportional to duration and at least max(1, ceil(duration_s / 600)). Add several frames per chapter when each adds distinct information; put every frame beside its block text.
+
+Corrections are only for lies or flagrant imprecision. Questions are only for essential unavoidable information. Complements add useful precision without replacing the author's message. Fact-check any factual domain, including official statistics, with official institutions, statistical offices, reference encyclopedias, or peer-reviewed sources. Never debunk religion, spirituality, or esotericism. Corrections and complements require references; questions may have none. Number references from 1 in order and use those IDs in callouts. Total callout text must not exceed total block text.
+
+Use context only with evidence: recording date and author email require non-empty evidence; include email only when published by the author in a description or slide. Include a series only with evidence; host research may use web search, otherwise leave it null. Summarize comments without names or identifiers, and read comments.json only when it exists (fetched top-level count: {len(comments) if comments is not None else 0}). Every visible label must be written in the sheet language. Distinguish on-screen evidence, speech, and inference. Use corrected speech only when its provenance is present in the bundle. Do not call a provider and do not delegate to a low-cost model.
+
+Script-owned facts (include these verbatim; do not invent or edit them):
+```json
+{facts_json}
+```
 
 The JSON must match this exact schema:
 
@@ -112,7 +128,7 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
     deps = deps or SheetPrepareDeps(os.environ)
     try:
         video = video.expanduser().resolve()
-        analysis, bundle, manifest, digest = _load_inputs(video)
+        analysis, bundle, manifest, digest, metadata, raw_info, comments = _load_inputs(video)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         print(f"sheet preparation input error: {error}", file=sys.stderr)
         return 2
@@ -125,7 +141,13 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
         model = host.default_model or "host default"
         locality = host.locality
         language, _ = _resolved_language(request.language, bundle)
-        params = {"bundle_sha256": digest, "host": host.host, "model": model,
+        from sheet_facts import build_sheet_facts, canonical_sha256
+        facts = build_sheet_facts(video, metadata=metadata, raw_info=raw_info,
+                                  manifest=manifest, bundle=bundle)
+        facts_hash = canonical_sha256(facts)
+        comments_hash = canonical_sha256(comments) if comments is not None else None
+        params = {"brief_version": 2, "sheet_schema_version": 2, "facts_sha256": facts_hash,
+                  "comments_sha256": comments_hash, "bundle_sha256": digest, "host": host.host, "model": model,
                   "provider": host.provider, "locality": locality, "language": language}
         _selection(host, model, locality)
         stage = manifest.get("stages", {}).get("sheet_prepare", {})
@@ -148,9 +170,11 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
             return 4
         consent = ({"required": True, "granted": True, "method": "flag"} if required else
                    {"required": False, "granted": True, "method": "not-required"})
-        brief_path.write_text(_brief(analysis, digest, params), encoding="utf-8")
+        brief_text = _brief(analysis, digest, params, facts, comments)
+        brief_path.write_text(brief_text, encoding="utf-8")
         manifest.setdefault("params", {})["sheet_prepare"] = params
-        manifest.setdefault("stages", {})["sheet_prepare"] = {"status": "ok", "consent": consent}
+        manifest.setdefault("stages", {})["sheet_prepare"] = {"status": "ok", "consent": consent,
+            "brief_sha256": hashlib.sha256(brief_text.encode("utf-8")).hexdigest()}
         _write_manifest(analysis / "manifest.json", manifest)
         print("sheet preparation complete")
         return 0

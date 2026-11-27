@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -78,7 +79,12 @@ def _document_from_template(template: Path | None):
                         b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml")
                 outgoing.writestr(entry, payload)
         target.seek(0)
-        return Document(target)
+        document = Document(target)
+        if not document.sections:
+            from copy import deepcopy
+            fallback = Document()
+            document._element.body.append(deepcopy(fallback._element.body.sectPr))
+        return document
     except ImportError:
         raise
     except Exception as error:
@@ -103,50 +109,102 @@ def _add_linked_time(paragraph, sheet: Mapping[str, Any], seconds: float) -> Non
         paragraph.add_run(timestamp)
 
 
-def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any],
-                    analysis_dir: Path) -> None:
+def _cell_borderless(table) -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH"):
+        node = OxmlElement(f"w:{edge}"); node.set(qn("w:val"), "nil"); borders.append(node)
+    node = OxmlElement("w:insideV"); node.set(qn("w:val"), "single"); node.set(qn("w:sz"), "4"); node.set(qn("w:color"), "B7B7B7"); borders.append(node)
+    table._tbl.tblPr.append(borders)
+
+
+def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any], analysis_dir: Path) -> None:
     from docx.shared import Inches
     heading = _paragraph(document, style="Heading 1")
-    _add_linked_time(heading, sheet, chapter["start"])
-    heading.add_run(" — " + chapter["title"])
-    _paragraph(document, chapter["text"])
-    for point in chapter["key_points"]:
-        _paragraph(document, point, "List Bullet")
-    frame = chapter["frame"]
-    if frame is None:
-        return
-    sections = document.sections
-    section = sections[-1] if sections else None
-    dimensions = ((section.page_width, section.left_margin, section.right_margin)
-                  if section is not None else ())
-    width = (dimensions[0] - dimensions[1] - dimensions[2]
-             if len(dimensions) == 3 and all(value is not None for value in dimensions)
-             else Inches(6))
-    document.add_picture(str(analysis_dir / Path(*frame["file"].split("/"))), width=width)
-    caption = _paragraph(document, style="Caption")
-    caption.add_run(sheet["labels"]["figure"] + " ")
-    _add_linked_time(caption, sheet, frame["time"])
+    _add_linked_time(heading, sheet, chapter["start"]); heading.add_run(" — " + chapter["title"])
+    section = document.sections[-1] if document.sections else None
+    sect_pr = document._element.body.sectPr
+    has_page_size = sect_pr is not None and sect_pr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pgSz") is not None
+    available = (section.page_width - section.left_margin - section.right_margin) if section and has_page_size else Inches(6)
+    for block in chapter["blocks"]:
+        frame = block["frame"]
+        if frame is None:
+            _paragraph(document, block["text"])
+            continue
+        table = document.add_table(rows=1, cols=2); table.autofit = False; _cell_borderless(table)
+        text_width, image_width = int(available * .62), int(available * .38)
+        table.columns[0].width, table.columns[1].width = text_width, image_width
+        table.cell(0, 0).width, table.cell(0, 1).width = text_width, image_width
+        table.cell(0, 0).paragraphs[0].add_run(block["text"])
+        picture = table.cell(0, 1).paragraphs[0].add_run().add_picture(str(analysis_dir / Path(*frame["file"].split("/"))), width=Inches(1))
+        max_width = max(1, image_width - Inches(.18))
+        picture.width = max_width
+        caption = table.cell(0, 1).add_paragraph(style=_style(document, "Caption"))
+        caption.add_run(sheet["labels"]["figure"] + " "); _add_linked_time(caption, sheet, frame["time"])
+    for callout in chapter["callouts"]:
+        table = document.add_table(rows=1, cols=1); table.autofit = False
+        cell = table.cell(0, 0); shade = {"correction": "FDE2E1", "complement": "E3F0FB", "question": "FFF4D6"}[callout["kind"]]
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), shade); cell._tc.get_or_add_tcPr().append(shd)
+        paragraph = cell.paragraphs[0]; icon = {"correction": "✖", "complement": "ℹ", "question": "?"}[callout["kind"]]
+        paragraph.add_run(icon)
+        paragraph.add_run(" " + sheet["labels"][callout["kind"]] + ": " + callout["text"])
+        refs = {entry["id"]: entry for entry in sheet["references"]}
+        for source_id in callout["sources"]:
+            paragraph.add_run(" (" + sheet["labels"]["source"] + " : ")
+            _hyperlink(paragraph, str(source_id), refs[source_id]["url"]); paragraph.add_run(")")
 
 
-def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path,
-                    template: Path | None = None):
+def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapping[str, Any] | None = None,
+                    accounting: Mapping[str, Any] | None = None, template: Path | None = None):
     from sheet_schema import is_safe_web_url
+    from docx.shared import Inches
     document = _document_from_template(template)
     _clear_body(document)
     _paragraph(document, sheet["title"], "Title")
-    source = _paragraph(document, style="Normal")
-    source.add_run(sheet["labels"]["source"] + ": " + sheet["source"]["title"])
-    source_url = sheet["source"].get("url")
-    if source_url:
-        source.add_run(" (")
-        if is_safe_web_url(source_url):
-            _hyperlink(source, source_url, source_url)
-        else:
-            source.add_run(source_url)
-        source.add_run(")")
-    for field in ("introduction", "summary"):
-        _paragraph(document, sheet["labels"][field], "Heading 1")
-        _paragraph(document, sheet[field])
+    facts, accounting = facts or {}, accounting or {"tokens": {"total": 0, "measured": 0, "estimated": 0}, "usd": {"total": "n/a"}}
+    section = document.sections[-1] if document.sections else None
+    sect_pr = document._element.body.sectPr
+    has_page_size = sect_pr is not None and sect_pr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pgSz") is not None
+    available = (section.page_width - section.left_margin - section.right_margin) if section and has_page_size else Inches(6)
+    facts_table = document.add_table(rows=0, cols=2); facts_table.autofit = False
+    facts_table.columns[0].width, facts_table.columns[1].width =  Inches(1.55), max(Inches(1), available - Inches(1.55))
+    rows = [(sheet["labels"]["source"], sheet["source"]["title"])]
+    for key, value in facts.items():
+        label = sheet["labels"]["facts"].get(key, key)
+        if key in {"channel_url"} or key == "description_links":
+            values = value if isinstance(value, list) else [value]
+            for link in values: rows.append((label, link))
+        elif key == "file_size_mb": rows.append((label, f"{value:.2f} MB"))
+        else: rows.append((label, ", ".join(value) if isinstance(value, list) else str(value)))
+    tokens, usd = accounting.get("tokens", {}), accounting.get("usd", {})
+    usd_text = "n/a" if usd.get("total") == "n/a" else f"{usd.get('total', 0):.6f} $"
+    rows.append((sheet["labels"]["cost"], f"{tokens.get('total', 0)} {sheet['labels']['tokens']} · {usd_text} ({tokens.get('measured', 0)} {sheet['labels']['measured']} + {tokens.get('estimated', 0)} {sheet['labels']['estimated']}, prices as of 2026-11-03)"))
+    for label, value in rows:
+        cells = facts_table.add_row().cells; cells[0].width, cells[1].width = Inches(1.55), max(Inches(1), available - Inches(1.55))
+        cells[0].text = str(label); p = cells[1].paragraphs[0]
+        if label == sheet["labels"]["source"] and is_safe_web_url(sheet["source"].get("url")):
+            p.add_run(str(value) + " ("); _hyperlink(p, sheet["source"]["url"], sheet["source"]["url"]); p.add_run(")")
+        elif isinstance(value, str) and is_safe_web_url(value): _hyperlink(p, value, value)
+        else: p.add_run(str(value))
+        for cell in cells:
+            for run in cell.paragraphs[0].runs: run.font.size = __import__("docx").shared.Pt(8)
+    context = sheet["context"]
+    for field, label_key in (("recording_date", "recording_date"), ("series", "series"), ("author_email", "author_email"), ("comments_summary", "comments")):
+        value = context[field]
+        if value is None: continue
+        p = _paragraph(document); p.add_run(sheet["labels"][label_key] + ": ")
+        if field == "series":
+            p.add_run(value["theme"])
+            if value["first_video_url"] and is_safe_web_url(value["first_video_url"]): p.add_run(" ("); _hyperlink(p, value["first_video_url"], value["first_video_url"]); p.add_run(")")
+        else: p.add_run(value["value"] if isinstance(value, dict) else value)
+    _paragraph(document, sheet["labels"]["introduction"], "Heading 1"); _paragraph(document, sheet["introduction"])
+    _paragraph(document, sheet["labels"]["summary"], "Heading 1")
+    for paragraph in sheet["summary"]: _paragraph(document, paragraph)
+    _paragraph(document, sheet["labels"]["chapters_rationale"], "Heading 2")
+    rationale = _paragraph(document, sheet["chapter_rationale"]); [setattr(run, "italic", True) for run in rationale.runs]
     for chapter in sheet["chapters"]:
         _render_chapter(document, sheet, chapter, analysis_dir)
     if sheet["glossary"]:
@@ -154,6 +212,10 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path,
         for item in sheet["glossary"]:
             _paragraph(document, item["term"], "Heading 2")
             _paragraph(document, item["definition"])
+    if sheet["references"]:
+        _paragraph(document, sheet["labels"]["references"], "Heading 1")
+        for reference in sheet["references"]:
+            p = _paragraph(document); p.add_run(f"{reference['id']} : "); _hyperlink(p, reference["url"], reference["url"]); p.add_run(" — " + reference["title"])
     properties = document.core_properties
     properties.title = sheet["title"]
     properties.author = "video-analysis"
@@ -204,8 +266,8 @@ def _render_inputs(video: Path, template: Path | None) -> tuple[Path, Path, Path
     return video, analysis, *paths, template
 
 
-def _prepared_sheet(manifest_path: Path, bundle_path: Path, sheet_path: Path,
-                    analysis: Path) -> tuple[dict[str, Any], str, dict[str, Any]]:
+def _prepared_sheet(video: Path, manifest_path: Path, bundle_path: Path, sheet_path: Path,
+                    analysis: Path) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any], str, str]:
     manifest = _read_manifest(manifest_path)
     prep = manifest["stages"].get("sheet_prepare")
     if not isinstance(prep, dict) or prep.get("status") != "ok":
@@ -227,15 +289,35 @@ def _prepared_sheet(manifest_path: Path, bundle_path: Path, sheet_path: Path,
     if expected_source_url is not None and not isinstance(expected_source_url, str):
         raise _RenderError(2, "bundle.json is malformed")
     from sheet_schema import load_sheet
+    from sheet_facts import build_sheet_facts, canonical_sha256
+    from sheet_cost import build_sheet_accounting
     expected = {"host": prep_params.get("host"), "model": prep_params.get("model"), "role": "default"}
-    return manifest, bundle_digest, load_sheet(sheet_path, analysis_dir=analysis,
+    raw = json.loads((analysis / "raw_info.json").read_text(encoding="utf-8")) if (analysis / "raw_info.json").is_file() else {}
+    metadata = json.loads((analysis / "metadata.json").read_text(encoding="utf-8")) if (analysis / "metadata.json").is_file() else {}
+    facts = build_sheet_facts(video, metadata=metadata, raw_info=raw, manifest=manifest, bundle=bundle)
+    facts_hash = canonical_sha256(facts)
+    comments = json.loads((analysis / "comments.json").read_text(encoding="utf-8")) if (analysis / "comments.json").is_file() else None
+    comments_hash = canonical_sha256(comments) if comments is not None else None
+    brief_path = analysis / "sheet.brief.md"
+    if (facts_hash != prep_params.get("facts_sha256") or comments_hash != prep_params.get("comments_sha256")
+            or not brief_path.is_file() or _digest(brief_path) != prep.get("brief_sha256")):
+        raise _RenderError(3, "sheet facts, comments, or brief changed since preparation")
+    duration = bundle.get("source", {}).get("duration")
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or not math.isfinite(duration): duration = facts.get("duration_s", 0)
+    sheet = load_sheet(sheet_path, analysis_dir=analysis,
         expected_bundle_sha256=bundle_digest, expected_writer=expected,
-        expected_source_url=expected_source_url)
+        expected_source_url=expected_source_url, expected_duration_s=float(duration))
+    brief_text = brief_path.read_text(encoding="utf-8")
+    bundle_text = bundle_path.read_text(encoding="utf-8")
+    sheet_text = sheet_path.read_text(encoding="utf-8")
+    accounting = build_sheet_accounting(manifest=manifest, provider=prep_params.get("provider"), model=prep_params.get("model", ""), brief_text=brief_text, bundle_text=bundle_text, sheet_text=sheet_text, sheet=sheet)
+    return manifest, bundle_digest, sheet, facts, accounting, facts_hash, canonical_sha256(accounting)
 
 
-def _render_params(sheet_path: Path, template: Path | None) -> dict[str, Any]:
+def _render_params(sheet_path: Path, template: Path | None, facts_sha: str, accounting_sha: str, brief_sha: str) -> dict[str, Any]:
     return {"sheet_sha256": _digest(sheet_path),
-            "template_sha256": _digest(template) if template else "builtin", "schema_version": 1}
+            "template_sha256": _digest(template) if template else "builtin", "schema_version": 2,
+            "facts_sha256": facts_sha, "accounting_sha256": accounting_sha, "brief_sha256": brief_sha}
 
 
 def _resume_decision(output_path: Path, output_name: str, manifest: Mapping[str, Any],
@@ -254,15 +336,24 @@ def _resume_decision(output_path: Path, output_name: str, manifest: Mapping[str,
 def run_render(video: Path, template: Path | None = None) -> int:
     try:
         video, analysis, manifest_path, bundle_path, sheet_path, template = _render_inputs(video, template)
-        manifest, _, sheet = _prepared_sheet(manifest_path, bundle_path, sheet_path, analysis)
-        params = _render_params(sheet_path, template)
+        try:
+            raw_value = json.loads(sheet_path.read_text(encoding="utf-8"))
+            raw_version = raw_value.get("schema_version") if isinstance(raw_value, dict) else None
+        except (json.JSONDecodeError, UnicodeError):
+            raise _RenderError(2, "sheet.json is malformed")
+        if raw_version == 1:
+            print("regenerate sheet.json with the v0.6.0 brief", file=sys.stderr)
+            return 3
+        manifest, _, sheet, facts, accounting, facts_sha, accounting_sha = _prepared_sheet(video, manifest_path, bundle_path, sheet_path, analysis)
+        prep = manifest["stages"]["sheet_prepare"]
+        params = _render_params(sheet_path, template, facts_sha, accounting_sha, prep.get("brief_sha256", ""))
         output_name = f"{video.stem}.docx"
         output_path = analysis / output_name
         resumed = _resume_decision(output_path, output_name, manifest, params)
         if resumed is not None:
             return resumed
         try:
-            document = render_document(sheet, analysis_dir=analysis, template=template)
+            document = render_document(sheet, analysis_dir=analysis, facts=facts, accounting=accounting, template=template)
         except Exception as error:
             if error.__class__.__module__.startswith("docx.image"):
                 raise _RenderError(3, f"invalid frame image: {error}") from error

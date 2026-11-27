@@ -550,18 +550,17 @@ def _sheet_fixture(root: Path) -> tuple[Path, Path, dict, dict]:
     frame = frames / "frame.jpg"
     from PIL import Image
     Image.new("RGB", (12, 8), "red").save(frame)
-    bundle = {"source": {"url": "https://youtu.be/abc"},
+    bundle = {"source": {"url": "https://youtu.be/abc", "duration": 5},
               "speech": {"language": "fr"}, "chapters": []}
     (analysis / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
     digest = hashlib.sha256((analysis / "bundle.json").read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
-    sheet = {"schema_version": 1, "source": {"bundle_sha256": digest, "title": "Sample",
+    labels = {key: key.replace("_", " ").title() for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
+    labels["facts"] = {key: key.replace("_", " ").title() for key in __import__("sheet_schema").FACT_KEYS}
+    sheet = {"schema_version": 2, "source": {"bundle_sha256": digest, "title": "Sample",
              "url": "https://youtu.be/abc"}, "language": "fr", "title": "Lesson",
-             "introduction": "Intro", "summary": "Résumé", "labels": {"source": "Source",
-             "introduction": "Introduction", "summary": "Résumé", "glossary": "Glossaire",
-             "figure": "Figure à"}, "chapters": [{"title": "Chapter", "text": "Text",
-             "start": 1, "end": 5, "key_points": ["Point"],
-             "frame": {"file": "frames/frame.jpg", "time": 2}}], "glossary": [], "writer": writer}
+             "introduction": "Intro", "summary": ["Résumé"], "chapter_rationale": "Rationale", "context": {"recording_date": None, "series": None, "comments_summary": None, "author_email": None}, "labels": labels,
+             "chapters": [{"title": "Chapter", "start": 1, "end": 5, "blocks": [{"text": "Text with useful details", "frame": {"file": "frames/frame.jpg", "time": 2}}], "callouts": []}], "references": [], "glossary": [], "writer": writer}
     manifest = {"schema_version": 2, "source": {"kind": "local"}, "params": {}, "stages": {}}
     (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return analysis, frame, sheet, writer
@@ -575,7 +574,8 @@ def _sheet_error(value: dict, analysis: Path, writer: dict, field: str, reason: 
     expected_url = bundle.get("source", {}).get("url")
     try:
         validate_sheet(value, analysis_dir=analysis, expected_bundle_sha256=current_digest,
-                       expected_writer=writer, expected_source_url=expected_url)
+                       expected_writer=writer, expected_source_url=expected_url,
+                       expected_duration_s=float(bundle.get("source", {}).get("duration", 5)))
     except SheetValidationError as error:
         return (error.field, error.reason) == (field, reason)
     return False
@@ -607,9 +607,9 @@ def check_sheet_schema_valid() -> bool:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         accepted = validate_sheet(sheet, analysis_dir=analysis,
             expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer,
-            expected_source_url="https://youtu.be/abc")
-        return (accepted == sheet and set(accepted["labels"]) == {
-            "source", "introduction", "summary", "glossary", "figure"}
+            expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        return (accepted == sheet and set(accepted["labels"]) >= {
+            "source", "introduction", "summary", "glossary", "figure", "facts"}
             and format_hhmmss(360000.9) == "100:00:00")
 
 
@@ -633,10 +633,10 @@ def check_sheet_schema_types_text() -> bool:
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["schema_version"] = True
-        empty = json.loads(json.dumps(valid)); empty["chapters"][0]["text"] = "  "
+        empty = json.loads(json.dumps(valid)); empty["chapters"][0]["blocks"][0]["text"] = "  "
         labels = json.loads(json.dumps(valid)); labels["labels"]["summary"] = ""
-        return (_sheet_error(wrong, analysis, writer, "schema_version", "must be schema version 1")
-            and _sheet_error(empty, analysis, writer, "chapters[0].text", "must be a non-empty string")
+        return (_sheet_error(wrong, analysis, writer, "schema_version", "must be schema version 2")
+            and _sheet_error(empty, analysis, writer, "chapters[0].blocks[0].text", "must be a non-empty string")
             and _sheet_error(labels, analysis, writer, "labels.summary", "must be a non-empty string"))
 
 
@@ -650,16 +650,15 @@ def check_sheet_schema_intervals() -> bool:
 def check_sheet_schema_ordering() -> bool:
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
-        wrong = json.loads(json.dumps(valid)); wrong["chapters"].append({**wrong["chapters"][0],
-            "start": 4, "end": 6, "frame": None})
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"].append({**wrong["chapters"][0], "start": 4, "end": 6})
         return _sheet_error(wrong, analysis, writer, "chapters[1]", "must be ordered and non-overlapping")
 
 
 def check_sheet_schema_frame_time() -> bool:
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
-        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["time"] = 6
-        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.time", "must be within chapter interval")
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["time"] = 6
+        return _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.time", "must be within chapter interval")
 
 
 def check_sheet_schema_frame_paths() -> bool:
@@ -667,25 +666,25 @@ def check_sheet_schema_frame_paths() -> bool:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         paths = ("/tmp/frame.jpg", "C:/frame.jpg", "../frame.jpg", "frames\\frame.jpg", "frames/./frame.jpg")
         for path in paths:
-            wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = path
-            if not _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+            wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["file"] = path
+            if not _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.file",
                                 "must be a normalized relative path inside the analysis folder"):
                 return False
-        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/frame.gif"
-        if not _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["file"] = "frames/frame.gif"
+        if not _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.file",
                             "must be a JPEG or PNG image"):
             return False
         (analysis / "frames" / "not-image.png").write_bytes(b"not an image")
-        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/not-image.png"
-        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["file"] = "frames/not-image.png"
+        return _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.file",
                             "must be a JPEG or PNG image")
 
 
 def check_sheet_schema_missing_frame() -> bool:
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
-        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/missing.jpg"
-        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.file", "file does not exist")
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["file"] = "frames/missing.jpg"
+        return _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.file", "file does not exist")
 
 
 def check_sheet_schema_digest() -> bool:
@@ -700,6 +699,102 @@ def check_sheet_schema_writer() -> bool:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         return _sheet_error(valid, analysis, {**writer, "model": "other"}, "writer",
                             "does not match sheet preparation")
+
+
+def check_sheet_v2_duration_summary() -> bool:
+    from sheet_schema import SheetValidationError, validate_sheet
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, sheet, writer = _sheet_fixture(Path(temp))
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"],
+                           expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=1200)
+        except SheetValidationError as error:
+            return error.field == "summary" and "2 paragraphs" in error.reason
+        return False
+
+
+def check_sheet_v2_blocks_references() -> bool:
+    from sheet_schema import SheetValidationError, validate_sheet
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, sheet, writer = _sheet_fixture(Path(temp))
+        sheet["references"] = [{"id": 1, "url": "https://example.org/ref", "title": "Reference", "origin": "source"}]
+        sheet["chapters"][0]["callouts"] = [{"kind": "correction", "text": "A correction", "sources": [1]}]
+        valid = validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        sheet["chapters"][0]["callouts"][0]["sources"] = [2]
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        except SheetValidationError as error:
+            return valid["references"][0]["id"] == 1 and error.field.endswith("sources")
+        return False
+
+
+def check_sheet_v2_context_budget() -> bool:
+    from sheet_schema import SheetValidationError, validate_sheet
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, sheet, writer = _sheet_fixture(Path(temp))
+        sheet["context"]["author_email"] = {"value": "author@example.org", "evidence": "Published slide"}
+        sheet["context"]["series"] = {"theme": "Series", "first_video_url": "javascript:alert(1)"}
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        except SheetValidationError as error:
+            return error.field == "context.series.first_video_url"
+        return False
+
+
+def check_renderer_v1_refusal() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, sheet = _render_fixture(Path(temp))
+        sheet["schema_version"] = 1
+        (analysis / "sheet.json").write_text(json.dumps(sheet), encoding="utf-8")
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            result = run_render(video)
+        return result == 3 and error.getvalue().strip() == "regenerate sheet.json with the v0.6.0 brief" and not (analysis / "sample.docx").exists()
+
+
+def check_render_v2_identity() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, _ = _render_fixture(Path(temp))
+        if run_render(video) != 0: return False
+        manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        params = manifest["params"]["sheet_render"]
+        return all(key in params for key in ("schema_version", "facts_sha256", "accounting_sha256", "brief_sha256")) and params["schema_version"] == 2
+
+
+def check_docx_v2_layout() -> bool:
+    from render_sheet import render_document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        _, analysis, sheet = _render_fixture(Path(temp))
+        sheet["references"] = [{"id": 1, "url": "https://example.org/ref", "title": "Ref", "origin": "source"}]
+        sheet["chapters"][0]["callouts"] = [{"kind": "complement", "text": "Extra detail", "sources": [1]}]
+        doc = render_document(sheet, analysis_dir=analysis)
+        xml = doc._element.xml
+        targets = [rel.target_ref for rel in doc.part.rels.values() if rel.reltype.endswith("/hyperlink")]
+        return ("E3F0FB" in xml and 'w:val="single"' in xml and "w:insideV" in xml and 'w:insideH w:val="nil"' in xml
+                and "https://example.org/ref" in targets and "ℹ" in xml
+                and len(doc.inline_shapes) == 1 and doc.inline_shapes[0].width < 6 * 914400 * .38)
+
+
+def check_prepare_v2_identity() -> bool:
+    from prepare_sheet import run_prepare
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
+        if run_prepare(video, request, deps) != 0: return False
+        manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        params, stage = manifest["params"]["sheet_prepare"], manifest["stages"]["sheet_prepare"]
+        return (params.get("brief_version") == 2 and params.get("sheet_schema_version") == 2
+                and len(params.get("facts_sha256", "")) == 64 and params.get("comments_sha256") is None
+                and len(stage.get("brief_sha256", "")) == 64)
+
+
+def check_sheet_model_facts_rejected() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, sheet, writer = _sheet_fixture(Path(temp))
+        sheet["facts"] = {"view_count": 999}
+        sheet["accounting"] = {"usd": {"total": 0}}
+        return _sheet_error(sheet, analysis, writer, "$", "must contain only schema fields")
 
 
 def check_sheet_seek_links() -> bool:
@@ -758,7 +853,7 @@ def check_sheet_prepare_consent_matrix() -> bool:
 
 def check_sheet_prepare_brief_contract() -> bool:
     from prepare_sheet import run_prepare
-    from sheet_schema import SHEET_JSON_SCHEMA_V1
+    from sheet_schema import SHEET_JSON_SCHEMA_V2
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
         if run_prepare(video, request, deps) != 0:
@@ -766,12 +861,15 @@ def check_sheet_prepare_brief_contract() -> bool:
         brief = (analysis / "sheet.brief.md").read_text(encoding="utf-8")
         manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
         params = manifest["params"]["sheet_prepare"]
-        return (json.dumps(SHEET_JSON_SCHEMA_V1, ensure_ascii=False, indent=2) in brief
+        return (json.dumps(SHEET_JSON_SCHEMA_V2, ensure_ascii=False, indent=2) in brief
             and str((analysis / "bundle.json").resolve()) in brief
             and str((analysis / "sheet.json").resolve()) in brief
             and "Copy `bundle.json` `source.url` exactly" in brief
             and params["host"] in brief and params["model"] in brief
             and "low-cost" in brief and "do not call a provider" in brief.lower()
+            and "never betray the author's message" in brief and "Never debunk religion" in brief
+            and "official institutions" in brief and "comments.json only when it exists" in brief
+            and '"title"' in brief and "Script-owned facts" in brief
             and manifest["stages"]["sheet_prepare"]["consent"] == {
                 "required": False, "granted": True, "method": "not-required"})
 
@@ -801,24 +899,27 @@ def _render_fixture(root: Path, *, prepared: bool = True) -> tuple[Path, Path, d
     (analysis / "frames").mkdir()
     Image.new("RGB", (12, 8), "red").save(analysis / "frames" / "frame.png")
     bundle_path = analysis / "bundle.json"
-    bundle_path.write_text(json.dumps({"source": {"url": "https://youtu.be/abc"},
+    bundle_path.write_text(json.dumps({"source": {"url": "https://youtu.be/abc", "duration": 5},
                                        "speech": {"language": "fr"}}), encoding="utf-8")
     digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
-    sheet = {"schema_version": 1, "source": {"bundle_sha256": digest, "title": "Sample",
+    labels = {key: key for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
+    labels.update({"source": "Origine", "introduction": "Présentation", "summary": "Résumé", "glossary": "Lexique", "figure": "Image à"})
+    labels["facts"] = {key: key for key in __import__("sheet_schema").FACT_KEYS}
+    sheet = {"schema_version": 2, "source": {"bundle_sha256": digest, "title": "Sample",
         "url": "https://youtu.be/abc"}, "language": "fr", "title": "Lesson",
-        "introduction": "Intro text", "summary": "Summary text", "labels": {
-        "source": "Origine", "introduction": "Présentation", "summary": "Résumé",
-        "glossary": "Lexique", "figure": "Image à"}, "chapters": [{"title": "Chapter",
-        "text": "Chapter text", "start": 1, "end": 5, "key_points": ["Point one"],
-        "frame": {"file": "frames/frame.png", "time": 2}}], "glossary": [
+        "introduction": "Intro text", "summary": ["Summary text"], "chapter_rationale": "Rationale", "context": {"recording_date": None, "series": None, "comments_summary": None, "author_email": None}, "labels": labels, "references": [], "chapters": [{"title": "Chapter",
+        "start": 1, "end": 5, "blocks": [{"text": "Chapter text with enough details", "frame": {"file": "frames/frame.png", "time": 2}}], "callouts": []}], "glossary": [
         {"term": "Term", "definition": "Meaning"}], "writer": writer}
     (analysis / "sheet.json").write_text(json.dumps(sheet, ensure_ascii=False), encoding="utf-8")
+    (analysis / "sheet.brief.md").write_text("test brief", encoding="utf-8")
     manifest = {"schema_version": 2, "source": {"kind": "local"}, "params": {}, "stages": {}}
     if prepared:
-        manifest["params"]["sheet_prepare"] = {"bundle_sha256": digest, "host": writer["host"],
+        from sheet_facts import build_sheet_facts, canonical_sha256
+        facts = build_sheet_facts(video, metadata={}, raw_info={}, manifest=manifest, bundle=json.loads(bundle_path.read_text()))
+        manifest["params"]["sheet_prepare"] = {"brief_version": 2, "sheet_schema_version": 2, "facts_sha256": canonical_sha256(facts), "comments_sha256": None, "bundle_sha256": digest, "host": writer["host"],
             "model": writer["model"], "provider": "anthropic", "locality": "local", "language": "fr"}
-        manifest["stages"]["sheet_prepare"] = {"status": "ok", "consent": {"required": False,
+        manifest["stages"]["sheet_prepare"] = {"status": "ok", "brief_sha256": hashlib.sha256(b"test brief").hexdigest(), "consent": {"required": False,
             "granted": True, "method": "not-required"}}
     (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return video, analysis, sheet
@@ -876,10 +977,10 @@ def check_default_docx_render() -> bool:
         from render_sheet import _hyperlink
         _hyperlink(localized.paragraphs[1], "localized", "https://example.com")
         style_values = [node.get(qn("w:val")) for node in localized_link.xpath(".//w:rStyle")]
+        table_text = " ".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
         return (visible_hyperlinks and not has_hyperlink_style and style_values == ["Lienhypertexte"]
-            and text[0] == "Lesson" and any("Origine: Sample" in value for value in text) and "Présentation" in text
-            and "Résumé" in text and "Lexique" in text and "Image à 00:00:02" in text
-            and any(style == "List Bullet" and value == "Point one" for style, value in paragraphs)
+            and text[0] == "Lesson" and "Sample" in table_text and "Présentation" in text
+            and "Résumé" in text and "Lexique" in text and "Chapter text" in table_text and "Image à" in table_text
             and len(doc.inline_shapes) == 1 and doc.core_properties.title == "Lesson"
             and doc.core_properties.author == "video-analysis"
             and doc.core_properties.created == FIXED_CORE_TIME
@@ -902,7 +1003,7 @@ def check_sheet_source_url_security() -> bool:
         mismatching["source"] = {**sheet["source"], "url": "https://example.invalid/video"}
         try:
             validate_sheet(mismatching, analysis_dir=analysis, expected_bundle_sha256=digest,
-                           expected_writer=expected_writer, expected_source_url="https://youtu.be/abc")
+                expected_writer=expected_writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
         except SheetValidationError as error:
             if (error.field, error.reason) != ("source.url", "does not match current bundle.json"):
                 return False
@@ -1006,7 +1107,7 @@ def check_missing_styles_fallback() -> bool:
                     outgoing.writestr(item, payload)
             try:
                 result = render_document(sheet, analysis_dir=analysis, template=target)
-                cases.append(len(result.inline_shapes) == 1 and result.inline_shapes[0].width == 6 * 914400)
+                cases.append(len(result.inline_shapes) == 1 and result.inline_shapes[0].width == int(6 * 914400 * .38) - 164592)
             except Exception:
                 cases.append(False)
         return all(cases)
@@ -2869,8 +2970,32 @@ def main() -> int:
             "comments disable and unavailable states are explicit", check_comments_states)
         checks["analyze_video forwards bounded comments"] = run_check(
             "analyze_video forwards bounded comments", check_analyze_video_comments)
-        checks["sheet schema accepts valid v1"] = run_check(
-            "sheet schema accepts valid v1", check_sheet_schema_valid)
+        checks["sheet schema accepts strict v2 and rejects unknown nested fields"] = run_check(
+            "sheet schema accepts strict v2 and rejects unknown nested fields", check_sheet_schema_valid)
+        checks["sheet schema enforces duration proportional summary paragraphs"] = run_check(
+            "sheet schema enforces duration proportional summary paragraphs", check_sheet_v2_duration_summary)
+        checks["sheet schema validates blocks frames references and callout sources"] = run_check(
+            "sheet schema validates blocks frames references and callout sources", check_sheet_v2_blocks_references)
+        checks["sheet schema enforces context evidence safe URLs and callout budget"] = run_check(
+            "sheet schema enforces context evidence safe URLs and callout budget", check_sheet_v2_context_budget)
+        checks["sheet brief embeds facts and the complete editorial contract"] = run_check(
+            "sheet brief embeds facts and the complete editorial contract", check_sheet_prepare_brief_contract)
+        checks["sheet preparation tracks schema facts comments and brief identity"] = run_check(
+            "sheet preparation tracks schema facts comments and brief identity", check_prepare_v2_identity)
+        checks["renderer refuses schema v1 with the v0.6.0 regeneration message"] = run_check(
+            "renderer refuses schema v1 with the v0.6.0 regeneration message", check_renderer_v1_refusal)
+        checks["default DOCX renders facts accounting context blocks callouts and references"] = run_check(
+            "default DOCX renders facts accounting context blocks callouts and references", check_default_docx_render)
+        checks["DOCX v2 hyperlinks borders shading and image widths are correct"] = run_check(
+            "DOCX v2 hyperlinks borders shading and image widths are correct", check_docx_v2_layout)
+        checks["DOCX templates preserve styles headers footers and section properties"] = run_check(
+            "DOCX templates preserve styles headers footers and section properties", check_docx_template_preservation)
+        checks["render resume identity includes recomputed facts accounting and brief"] = run_check(
+            "render resume identity includes recomputed facts accounting and brief", check_render_v2_identity)
+        checks["render never trusts model authored facts or accounting"] = run_check(
+            "render never trusts model authored facts or accounting", check_sheet_model_facts_rejected)
+        checks["sheet schema accepts valid v2"] = run_check(
+            "sheet schema accepts valid v2", check_sheet_schema_valid)
         checks["sheet schema rejects missing and unknown fields with named errors"] = run_check(
             "sheet schema rejects missing and unknown fields with named errors", check_sheet_schema_required_unknown_labels)
         checks["sheet schema rejects wrong types and empty required text"] = run_check(
