@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import wave
+import zipfile
 from pathlib import Path
 from typing import Callable
 from dataclasses import replace
@@ -338,7 +339,7 @@ def check_network_fetch(url: str, folder: Path) -> bool:
 
 def check_script_help_contract() -> bool:
     scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py",
-               "analyze_video.py", "prepare_sheet.py")
+               "analyze_video.py", "prepare_sheet.py", "render_sheet.py")
     for script in scripts:
         result = subprocess.run([sys.executable, str(HERE / script), "-h"],
                                 capture_output=True, text=True, check=False)
@@ -452,10 +453,13 @@ def check_sheet_schema_required_unknown_labels() -> bool:
         unknown = dict(valid); unknown["extra"] = True
         labels = dict(valid); del labels["labels"]
         wrong_labels = dict(valid); wrong_labels["labels"] = {**valid["labels"], "extra": "x"}
+        nested_missing = dict(valid); nested_missing["chapters"] = [dict(valid["chapters"][0])]
+        del nested_missing["chapters"][0]["title"]
         return (_sheet_error(missing, analysis, writer, "title", "is required")
             and _sheet_error(unknown, analysis, writer, "$", "must contain only schema fields")
             and _sheet_error(labels, analysis, writer, "labels", "is required")
-            and _sheet_error(wrong_labels, analysis, writer, "labels", "must contain only schema fields"))
+            and _sheet_error(wrong_labels, analysis, writer, "labels", "must contain only schema fields")
+            and _sheet_error(nested_missing, analysis, writer, "chapters[0].title", "is required"))
 
 
 def check_sheet_schema_types_text() -> bool:
@@ -607,6 +611,191 @@ def check_sheet_prepare_resume_conflicts() -> bool:
             "params": {}, "stages": {}}))
         brief_conflict = run_prepare(video, request, deps) == 3 and brief.exists()
         return resumed and recreated and brief_conflict
+
+
+def _render_fixture(root: Path, *, prepared: bool = True) -> tuple[Path, Path, dict]:
+    from PIL import Image
+    root.mkdir(parents=True, exist_ok=True)
+    video = root / "sample.mp4"; video.write_bytes(b"video")
+    analysis = root / "sample.analysis"; analysis.mkdir()
+    (analysis / "frames").mkdir()
+    Image.new("RGB", (12, 8), "red").save(analysis / "frames" / "frame.png")
+    bundle_path = analysis / "bundle.json"
+    bundle_path.write_text(json.dumps({"speech": {"language": "fr"}}), encoding="utf-8")
+    digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
+    sheet = {"schema_version": 1, "source": {"bundle_sha256": digest, "title": "Sample",
+        "url": "https://youtu.be/abc"}, "language": "fr", "title": "Lesson",
+        "introduction": "Intro text", "summary": "Summary text", "labels": {
+        "source": "Origine", "introduction": "Présentation", "summary": "Résumé",
+        "glossary": "Lexique", "figure": "Image à"}, "chapters": [{"title": "Chapter",
+        "text": "Chapter text", "start": 1, "end": 5, "key_points": ["Point one"],
+        "frame": {"file": "frames/frame.png", "time": 2}}], "glossary": [
+        {"term": "Term", "definition": "Meaning"}], "writer": writer}
+    (analysis / "sheet.json").write_text(json.dumps(sheet, ensure_ascii=False), encoding="utf-8")
+    manifest = {"schema_version": 2, "source": {"kind": "local"}, "params": {}, "stages": {}}
+    if prepared:
+        manifest["params"]["sheet_prepare"] = {"bundle_sha256": digest, "host": writer["host"],
+            "model": writer["model"], "provider": "anthropic", "locality": "local", "language": "fr"}
+        manifest["stages"]["sheet_prepare"] = {"status": "ok", "consent": {"required": False,
+            "granted": True, "method": "not-required"}}
+    (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return video, analysis, sheet
+
+
+def _docx_template(path: Path, *, custom: bool = False) -> None:
+    from docx import Document
+    document = Document()
+    document.sections[0].left_margin = 914400
+    document.sections[0].right_margin = 914400
+    document.sections[0].header.paragraphs[0].text = "Template header"
+    document.sections[0].footer.paragraphs[0].text = "Template footer"
+    if custom:
+        document.styles.add_style("Caption", 1)
+        document.styles["Title"].font.bold = True
+    document.save(path)
+
+
+def _as_dotx(source: Path, target: Path) -> None:
+    with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(target, "w") as outgoing:
+        for item in incoming.infolist():
+            content = incoming.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                content = content.replace(
+                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml")
+            outgoing.writestr(item, content)
+
+
+def check_default_docx_render() -> bool:
+    from render_sheet import FIXED_CORE_TIME, render_document
+    from docx import Document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        _, analysis, sheet = _render_fixture(Path(temp))
+        doc = render_document(sheet, analysis_dir=analysis)
+        paragraphs = [(p.style.name, p.text) for p in doc.paragraphs]
+        text = [value for _, value in paragraphs]
+        return (text[0] == "Lesson" and any("Origine: Sample" in value for value in text) and "Présentation" in text
+            and "Résumé" in text and "Lexique" in text and "Image à 00:00:02" in text
+            and any(style == "List Bullet" and value == "Point one" for style, value in paragraphs)
+            and len(doc.inline_shapes) == 1 and doc.core_properties.title == "Lesson"
+            and doc.core_properties.author == "video-analysis"
+            and doc.core_properties.created == FIXED_CORE_TIME
+            and doc.core_properties.modified == FIXED_CORE_TIME)
+
+
+def check_docx_hyperlinks() -> bool:
+    from render_sheet import render_document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        _, analysis, sheet = _render_fixture(Path(temp))
+        supported = render_document(sheet, analysis_dir=analysis)
+        supported_targets = [rel.target_ref for rel in supported.part.rels.values() if rel.is_external]
+        if supported_targets != ["https://youtu.be/abc", "https://youtu.be/abc?t=1s",
+                                 "https://youtu.be/abc?t=2s"]:
+            return False
+        sheet["source"]["url"] = "https://example.invalid/video"
+        doc = render_document(sheet, analysis_dir=analysis)
+        targets = [rel.target_ref for rel in doc.part.rels.values() if rel.is_external]
+        return targets == ["https://example.invalid/video"]
+
+
+def check_docx_template_preservation() -> bool:
+    from render_sheet import render_document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        root = Path(temp); _, analysis, sheet = _render_fixture(root)
+        template = root / "styled.docx"; _docx_template(template)
+        doc = render_document(sheet, analysis_dir=analysis, template=template)
+        section = doc.sections[0]
+        return (section.left_margin == 914400 and section.right_margin == 914400
+            and section.header.paragraphs[0].text == "Template header"
+            and section.footer.paragraphs[0].text == "Template footer")
+
+
+def check_dotx_template() -> bool:
+    from render_sheet import run_render
+    from docx import Document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        root = Path(temp); video, analysis, _ = _render_fixture(root)
+        docx = root / "template.docx"; dotx = root / "template.dotx"
+        _docx_template(docx); _as_dotx(docx, dotx); original = dotx.read_bytes()
+        if run_render(video, dotx) != 0 or dotx.read_bytes() != original:
+            return False
+        output = analysis / "sample.docx"
+        Document(output)
+        with zipfile.ZipFile(output) as package:
+            types = package.read("[Content_Types].xml")
+        return b"wordprocessingml.document.main+xml" in types and b"wordprocessingml.template.main+xml" not in types
+
+
+def check_missing_styles_fallback() -> bool:
+    from render_sheet import render_document
+    from docx import Document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        root = Path(temp); _, analysis, sheet = _render_fixture(root)
+        template = root / "sparse.docx"; _docx_template(template)
+        doc = Document(template)
+        for name in ("Title", "Heading 1", "Heading 2", "List Bullet", "Caption"):
+            style = doc.styles[name]
+            style._element.getparent().remove(style._element)
+        doc.save(template)
+        rendered = render_document(sheet, analysis_dir=analysis, template=template)
+        return all(p.style.name == "Normal" for p in rendered.paragraphs)
+
+
+def check_render_resume_preserves_docx() -> bool:
+    from render_sheet import run_render
+    from docx import Document
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, _ = _render_fixture(Path(temp))
+        if run_render(video) != 0:
+            return False
+        output = analysis / "sample.docx"; doc = Document(output)
+        doc.add_paragraph("User edit"); doc.save(output); before = output.read_bytes()
+        return run_render(video) == 0 and output.read_bytes() == before
+
+
+def check_changed_sheet_refuses_docx() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, _ = _render_fixture(Path(temp))
+        if run_render(video) != 0:
+            return False
+        output = analysis / "sample.docx"; before = output.read_bytes()
+        path = analysis / "sheet.json"; value = json.loads(path.read_text()); value["title"] = "Changed"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return run_render(video) == 3 and output.read_bytes() == before
+
+
+def check_untracked_docx_refused() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, _ = _render_fixture(Path(temp)); output = analysis / "sample.docx"
+        output.write_bytes(b"user data")
+        return run_render(video) == 3 and output.read_bytes() == b"user data"
+
+
+def check_render_requires_preparation() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, _, _ = _render_fixture(Path(temp), prepared=False)
+        return run_render(video) == 4
+
+
+def check_render_rejects_changed_bundle() -> bool:
+    from render_sheet import run_render
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, _ = _render_fixture(Path(temp))
+        (analysis / "bundle.json").write_text('{"changed":true}', encoding="utf-8")
+        return run_render(video) == 3 and not (analysis / "sample.docx").exists()
+
+
+def check_setup_docx_dependency() -> bool:
+    import setup_tools
+    from tools import Tool
+    missing = setup_tools.missing_packages(module_lookup=lambda name: (
+        (_ for _ in ()).throw(ImportError(name)) if name == "docx" else object()),
+        ffmpeg=Tool("ffmpeg", "path"))
+    return "python-docx" in missing and setup_tools.PACKAGES.get("docx") == "python-docx"
 
 
 def make_offset_video(target: Path) -> None:
@@ -2426,6 +2615,28 @@ def main() -> int:
             "sheet brief contains exact schema and writer values", check_sheet_prepare_brief_contract)
         checks["sheet preparation resumes and conflicts safely"] = run_check(
             "sheet preparation resumes and conflicts safely", check_sheet_prepare_resume_conflicts)
+        checks["default DOCX render has ordered content images and properties"] = run_check(
+            "default DOCX render has ordered content images and properties", check_default_docx_render)
+        checks["DOCX render emits only supported seek hyperlinks"] = run_check(
+            "DOCX render emits only supported seek hyperlinks", check_docx_hyperlinks)
+        checks["DOCX template reuses styles headers footers and section properties"] = run_check(
+            "DOCX template reuses styles headers footers and section properties", check_docx_template_preservation)
+        checks["DOTX template renders as document content type"] = run_check(
+            "DOTX template renders as document content type", check_dotx_template)
+        checks["missing template styles fall back to Normal"] = run_check(
+            "missing template styles fall back to Normal", check_missing_styles_fallback)
+        checks["sheet render rerun preserves user-edited DOCX"] = run_check(
+            "sheet render rerun preserves user-edited DOCX", check_render_resume_preserves_docx)
+        checks["changed sheet refuses and leaves DOCX untouched"] = run_check(
+            "changed sheet refuses and leaves DOCX untouched", check_changed_sheet_refuses_docx)
+        checks["untracked DOCX is refused"] = run_check(
+            "untracked DOCX is refused", check_untracked_docx_refused)
+        checks["sheet render requires successful preparation"] = run_check(
+            "sheet render requires successful preparation", check_render_requires_preparation)
+        checks["sheet render rejects changed bundle digest"] = run_check(
+            "sheet render rejects changed bundle digest", check_render_rejects_changed_bundle)
+        checks["setup maps docx import to python-docx"] = run_check(
+            "setup maps docx import to python-docx", check_setup_docx_dependency)
         checks["ffmpeg resolution precedence"] = run_check("ffmpeg resolution precedence", check_tool_resolution)
         checks["host resolver detects explicit and marked hosts with provenance"] = run_check(
             "host resolver detects explicit and marked hosts with provenance", check_host_detection_and_provenance)

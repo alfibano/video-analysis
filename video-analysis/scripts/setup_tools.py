@@ -23,6 +23,7 @@ PACKAGES: dict[str, str] = {
     "imageio_ffmpeg": "imageio-ffmpeg",
     "rapidocr": "rapidocr",
     "openai": "openai",
+    "docx": "python-docx",
 }
 
 

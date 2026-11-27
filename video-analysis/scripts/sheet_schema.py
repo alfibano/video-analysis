@@ -97,7 +97,8 @@ def _keys(value: Any, required: tuple[str, ...], field: str) -> None:
     if not isinstance(value, dict):
         _fail(field, "must be an object")
     if any(key not in value for key in required):
-        _fail(next(key for key in required if key not in value), "is required")
+        missing = next(key for key in required if key not in value)
+        _fail(missing if field == "$" else f"{field}.{missing}", "is required")
     if set(value) != set(required):
         _fail(field, "must contain only schema fields")
 
