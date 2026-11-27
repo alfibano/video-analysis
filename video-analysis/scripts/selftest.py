@@ -828,7 +828,9 @@ def check_docx_v2_layout() -> bool:
         return ("E3F0FB" in xml and 'w:val="single"' in xml and "w:insideV" in xml and 'w:insideH w:val="nil"' in xml
                 and "https://example.org/ref" in targets and "ℹ" in xml
                 and len(doc.inline_shapes) == 1 and doc.inline_shapes[0].width < 6 * 914400 * .38
-                and abs(doc.inline_shapes[0].width / doc.inline_shapes[0].height - 12 / 8) < 0.01)
+                and abs(doc.inline_shapes[0].width / doc.inline_shapes[0].height - 12 / 8) < 0.01
+                and all(run.font.size is None for table in doc.tables for row in table.rows
+                        for cell in row.cells for para in cell.paragraphs for run in para.runs))
 
 
 def check_prepare_v2_identity() -> bool:

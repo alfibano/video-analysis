@@ -1,5 +1,11 @@
 # Release notes — video-analysis
 
+## v0.6.2 — 2026-11-27 — uniform text size
+
+### Fixed
+- The facts header table forced 8 pt text while its links stayed at body size. All non-heading text
+  now inherits the body (or user template) size.
+
 ## v0.6.1 — 2026-11-27 — undistorted sheet images
 
 ### Fixed

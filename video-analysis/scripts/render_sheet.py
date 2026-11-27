@@ -224,8 +224,6 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapp
                 else: p.add_run(str(link))
         elif isinstance(value, str) and is_safe_web_url(value): _hyperlink(p, value, value)
         else: p.add_run(str(value))
-        for cell in cells:
-            for run in cell.paragraphs[0].runs: run.font.size = __import__("docx").shared.Pt(8)
     context = sheet["context"]
     for field, label_key in (("recording_date", "recording_date"), ("series", "series"), ("author_email", "author_email"), ("comments_summary", "comments")):
         value = context[field]
