@@ -197,7 +197,7 @@ def check_fetch_manifest() -> bool:
             and option_sets[1]["outtmpl"] == str(dest.resolve() / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.%(ext)s")
             and "fetch" in accepted["stages"] and has_sponsorblock and has_progress
             and option_sets[3].get("getcomments") is True
-            and comment_options == {"comment_sort": ["top"], "max_comments": [100, 100, 0, 0, 1]})
+            and comment_options == {"comment_sort": ["top"], "max_comments": ["100", "100", "0", "0", "1"]})
 
 
 def check_sheet_facts() -> bool:

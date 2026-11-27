@@ -139,7 +139,7 @@ def build_comment_options(dest: Path, limit: int) -> dict[str, Any]:
     options = build_ydl_options(dest)
     options.update({"skip_download": True, "getcomments": True,
                     "extractor_args": {"youtube": {"comment_sort": ["top"],
-                                     "max_comments": [limit, limit, 0, 0, 1]}}})
+                                     "max_comments": [str(limit), str(limit), "0", "0", "1"]}}})
     return options
 
 
