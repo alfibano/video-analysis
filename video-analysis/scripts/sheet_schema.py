@@ -142,8 +142,16 @@ def _frame_path(value: Any, analysis_dir: Path, field: str) -> Path:
         resolved.relative_to(analysis_dir.resolve())
     except ValueError:
         _fail(field, "must be a normalized relative path inside the analysis folder")
+    if resolved.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+        _fail(field, "must be a JPEG or PNG image")
     if not resolved.is_file():
         _fail(field, "file does not exist")
+    try:
+        from PIL import Image
+        with Image.open(resolved) as image:
+            image.verify()
+    except Exception:
+        _fail(field, "must be a JPEG or PNG image")
     return resolved
 
 

@@ -386,7 +386,8 @@ def _sheet_fixture(root: Path) -> tuple[Path, Path, dict, dict]:
     frames = analysis / "frames"
     frames.mkdir(parents=True)
     frame = frames / "frame.jpg"
-    frame.write_bytes(b"frame")
+    from PIL import Image
+    Image.new("RGB", (12, 8), "red").save(frame)
     bundle = {"source": {"url": "https://youtu.be/abc"},
               "speech": {"language": "fr"}, "chapters": []}
     (analysis / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
@@ -508,7 +509,14 @@ def check_sheet_schema_frame_paths() -> bool:
             if not _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
                                 "must be a normalized relative path inside the analysis folder"):
                 return False
-        return True
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/frame.gif"
+        if not _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+                            "must be a JPEG or PNG image"):
+            return False
+        (analysis / "frames" / "not-image.png").write_bytes(b"not an image")
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/not-image.png"
+        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+                            "must be a JPEG or PNG image")
 
 
 def check_sheet_schema_missing_frame() -> bool:
@@ -581,7 +589,9 @@ def check_sheet_prepare_consent_matrix() -> bool:
         local_ok = run_prepare(local_video, local_request, local_deps) == 0
         url_video, url_dir, (url_request, url_deps) = _prepare_case(root / "url", kind="url")
         url_ok = run_prepare(url_video, url_request, url_deps) == 0
-        return denied_ok and approved == 0 and local_ok and url_ok
+        approved_manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+        consent_ok = approved_manifest["stages"]["sheet_prepare"]["consent"].get("method") == "flag"
+        return denied_ok and approved == 0 and consent_ok and local_ok and url_ok
 
 
 def check_sheet_prepare_brief_contract() -> bool:
@@ -697,7 +707,14 @@ def check_default_docx_render() -> bool:
                     if (color is None or color.get(qn("w:val")) != "0563C1"
                             or underline is None or underline.get(qn("w:val")) != "single"):
                         visible_hyperlinks = False
-        return (visible_hyperlinks and not has_hyperlink_style
+        localized = render_document(sheet, analysis_dir=analysis)
+        localized_style = localized.styles.add_style("Hyperlink", 2)
+        localized_style._element.set(qn("w:styleId"), "Lienhypertexte")
+        localized_link = localized.paragraphs[1]._p
+        from render_sheet import _hyperlink
+        _hyperlink(localized.paragraphs[1], "localized", "https://example.com")
+        style_values = [node.get(qn("w:val")) for node in localized_link.xpath(".//w:rStyle")]
+        return (visible_hyperlinks and not has_hyperlink_style and style_values == ["Lienhypertexte"]
             and text[0] == "Lesson" and any("Origine: Sample" in value for value in text) and "Présentation" in text
             and "Résumé" in text and "Lexique" in text and "Image à 00:00:02" in text
             and any(style == "List Bullet" and value == "Point one" for style, value in paragraphs)
@@ -742,7 +759,15 @@ def check_sheet_source_url_security() -> bool:
         mismatch_sheet = json.loads((mismatch_analysis / "sheet.json").read_text(encoding="utf-8"))
         mismatch_sheet["source"]["url"] = "https://example.invalid/video"
         (mismatch_analysis / "sheet.json").write_text(json.dumps(mismatch_sheet), encoding="utf-8")
-        return run_render(video) == 3 and not (mismatch_analysis / "sample.docx").exists()
+        if run_render(video) != 3 or (mismatch_analysis / "sample.docx").exists():
+            return False
+        from unittest.mock import patch
+        from docx.image.exceptions import UnrecognizedImageError
+        image_video, _, _ = _render_fixture(Path(temp) / "image-exception")
+        with patch("render_sheet.render_document", side_effect=UnrecognizedImageError("bad image")):
+            if run_render(image_video) != 3:
+                return False
+        return True
 
 
 def check_docx_template_preservation() -> bool:
@@ -770,7 +795,16 @@ def check_dotx_template() -> bool:
         Document(output)
         with zipfile.ZipFile(output) as package:
             types = package.read("[Content_Types].xml")
-        return b"wordprocessingml.document.main+xml" in types and b"wordprocessingml.template.main+xml" not in types
+        if not (b"wordprocessingml.document.main+xml" in types and b"wordprocessingml.template.main+xml" not in types):
+            return False
+        video2, analysis2, _ = _render_fixture(root / "named-docx")
+        disguised = root / "template-named-docx.docx"
+        disguised.write_bytes(dotx.read_bytes())
+        if run_render(video2, disguised) != 0:
+            return False
+        bad_template = root / "broken.docx"; bad_template.write_bytes(b"not a docx")
+        video3, _, _ = _render_fixture(root / "broken-template")
+        return run_render(video3, bad_template) == 2
 
 
 def check_missing_styles_fallback() -> bool:
@@ -785,7 +819,35 @@ def check_missing_styles_fallback() -> bool:
             style._element.getparent().remove(style._element)
         doc.save(template)
         rendered = render_document(sheet, analysis_dir=analysis, template=template)
-        return all(p.style.name == "Normal" for p in rendered.paragraphs)
+        if not all(p.style.name == "Normal" for p in rendered.paragraphs):
+            return False
+        from docx.oxml.ns import qn
+        cases = []
+        for name, remove_section, remove_dimensions in (("no-section", True, False), ("no-dimensions", False, True)):
+            source = root / f"{name}-source.docx"; target = root / f"{name}.docx"
+            _docx_template(source)
+            with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(target, "w") as outgoing:
+                for item in incoming.infolist():
+                    payload = incoming.read(item.filename)
+                    if item.filename == "word/document.xml":
+                        from lxml import etree
+                        xml = etree.fromstring(payload)
+                        sect = xml.find(f".//{qn('w:body')}/{qn('w:sectPr')}")
+                        if sect is not None:
+                            if remove_section:
+                                sect.getparent().remove(sect)
+                            elif remove_dimensions:
+                                for tag in (qn("w:pgSz"), qn("w:pgMar")):
+                                    node = sect.find(tag)
+                                    if node is not None: sect.remove(node)
+                        payload = etree.tostring(xml, xml_declaration=True, encoding="UTF-8", standalone=True)
+                    outgoing.writestr(item, payload)
+            try:
+                result = render_document(sheet, analysis_dir=analysis, template=target)
+                cases.append(len(result.inline_shapes) == 1 and result.inline_shapes[0].width == 6 * 914400)
+            except Exception:
+                cases.append(False)
+        return all(cases)
 
 
 def check_render_resume_preserves_docx() -> bool:
@@ -831,8 +893,19 @@ def check_render_rejects_changed_bundle() -> bool:
     from render_sheet import run_render
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
-        (analysis / "bundle.json").write_text('{"changed":true}', encoding="utf-8")
-        return run_render(video) == 3 and not (analysis / "sample.docx").exists()
+        bundle = analysis / "bundle.json"
+        bundle.write_text('{"source":{"url":"https://youtu.be/abc"},"changed":true}', encoding="utf-8")
+        if run_render(video) != 3 or (analysis / "sample.docx").exists():
+            return False
+        _, malformed_analysis, _ = _render_fixture(Path(temp) / "malformed-bundle")
+        malformed_video = malformed_analysis.parent / "sample.mp4"
+        (malformed_analysis / "bundle.json").write_text("{", encoding="utf-8")
+        if run_render(malformed_video) != 2:
+            return False
+        _, manifest_analysis, _ = _render_fixture(Path(temp) / "malformed-manifest")
+        manifest_video = manifest_analysis.parent / "sample.mp4"
+        (manifest_analysis / "manifest.json").write_text("{", encoding="utf-8")
+        return run_render(manifest_video) == 2
 
 
 def check_setup_docx_dependency() -> bool:

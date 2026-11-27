@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from sheet_schema import SheetValidationError
+
 FIXED_CORE_TIME = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
@@ -41,7 +43,7 @@ def _hyperlink(paragraph, text: str, target: str) -> None:
     run = OxmlElement("w:r")
     properties = OxmlElement("w:rPr")
     try:
-        paragraph.part.document.styles["Hyperlink"]
+        style_id = paragraph.part.document.styles["Hyperlink"].style_id
     except KeyError:
         color = OxmlElement("w:color")
         color.set(qn("w:val"), "0563C1")
@@ -50,7 +52,7 @@ def _hyperlink(paragraph, text: str, target: str) -> None:
         properties.extend((color, underline))
     else:
         style = OxmlElement("w:rStyle")
-        style.set(qn("w:val"), "Hyperlink")
+        style.set(qn("w:val"), style_id)
         properties.append(style)
     run.append(properties)
     text_node = OxmlElement("w:t")
@@ -64,20 +66,23 @@ def _document_from_template(template: Path | None):
     from docx import Document
     if template is None:
         return Document()
-    if template.suffix.lower() == ".docx":
-        return Document(template)
-    source = io.BytesIO(template.read_bytes())
-    target = io.BytesIO()
-    with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(target, "w") as outgoing:
-        for entry in incoming.infolist():
-            payload = incoming.read(entry.filename)
-            if entry.filename == "[Content_Types].xml":
-                payload = payload.replace(
-                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
-                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml")
-            outgoing.writestr(entry, payload)
-    target.seek(0)
-    return Document(target)
+    try:
+        source = io.BytesIO(template.read_bytes())
+        target = io.BytesIO()
+        with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(target, "w") as outgoing:
+            for entry in incoming.infolist():
+                payload = incoming.read(entry.filename)
+                if entry.filename == "[Content_Types].xml":
+                    payload = payload.replace(
+                        b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
+                        b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml")
+                outgoing.writestr(entry, payload)
+        target.seek(0)
+        return Document(target)
+    except ImportError:
+        raise
+    except Exception as error:
+        raise _RenderError(2, f"template is not a readable Word document: {error}") from error
 
 
 def _clear_body(document) -> None:
@@ -100,6 +105,7 @@ def _add_linked_time(paragraph, sheet: Mapping[str, Any], seconds: float) -> Non
 
 def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any],
                     analysis_dir: Path) -> None:
+    from docx.shared import Inches
     heading = _paragraph(document, style="Heading 1")
     _add_linked_time(heading, sheet, chapter["start"])
     heading.add_run(" — " + chapter["title"])
@@ -109,8 +115,13 @@ def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, An
     frame = chapter["frame"]
     if frame is None:
         return
-    section = document.sections[-1]
-    width = section.page_width - section.left_margin - section.right_margin
+    sections = document.sections
+    section = sections[-1] if sections else None
+    dimensions = ((section.page_width, section.left_margin, section.right_margin)
+                  if section is not None else ())
+    width = (dimensions[0] - dimensions[1] - dimensions[2]
+             if len(dimensions) == 3 and all(value is not None for value in dimensions)
+             else Inches(6))
     document.add_picture(str(analysis_dir / Path(*frame["file"].split("/"))), width=width)
     caption = _paragraph(document, style="Caption")
     caption.add_run(sheet["labels"]["figure"] + " ")
@@ -152,10 +163,13 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path,
 
 
 def _read_manifest(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise _RenderError(2, "manifest is malformed") from error
     if (not isinstance(value, dict) or not isinstance(value.get("params"), dict)
             or not isinstance(value.get("stages"), dict)):
-        raise ValueError("malformed manifest")
+        raise _RenderError(2, "manifest is malformed")
     return value
 
 
@@ -198,15 +212,20 @@ def _prepared_sheet(manifest_path: Path, bundle_path: Path, sheet_path: Path,
         raise _RenderError(4, "successful sheet preparation is required")
     prep_params = manifest["params"].get("sheet_prepare")
     if not isinstance(prep_params, dict):
-        raise _RenderError(3, "sheet preparation parameters are missing")
+        raise _RenderError(2, "manifest sheet preparation parameters are malformed")
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise _RenderError(2, "bundle.json is malformed") from error
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("source"), dict):
+        raise _RenderError(2, "bundle.json is malformed")
     bundle_digest = _digest(bundle_path)
     if prep_params.get("bundle_sha256") != bundle_digest:
         raise _RenderError(3, "bundle digest changed since sheet preparation")
-    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-    bundle_source = bundle.get("source") if isinstance(bundle, dict) else None
+    bundle_source = bundle["source"]
     expected_source_url = bundle_source.get("url") if isinstance(bundle_source, dict) else None
     if expected_source_url is not None and not isinstance(expected_source_url, str):
-        raise _RenderError(3, "bundle source URL is invalid")
+        raise _RenderError(2, "bundle.json is malformed")
     from sheet_schema import load_sheet
     expected = {"host": prep_params.get("host"), "model": prep_params.get("model"), "role": "default"}
     return manifest, bundle_digest, load_sheet(sheet_path, analysis_dir=analysis,
@@ -242,7 +261,12 @@ def run_render(video: Path, template: Path | None = None) -> int:
         resumed = _resume_decision(output_path, output_name, manifest, params)
         if resumed is not None:
             return resumed
-        document = render_document(sheet, analysis_dir=analysis, template=template)
+        try:
+            document = render_document(sheet, analysis_dir=analysis, template=template)
+        except Exception as error:
+            if error.__class__.__module__.startswith("docx.image"):
+                raise _RenderError(3, f"invalid frame image: {error}") from error
+            raise
         document.save(output_path)
         manifest["params"]["sheet_render"] = params
         manifest["stages"]["sheet_render"] = {"status": "ok", "output": output_name}
@@ -255,10 +279,15 @@ def run_render(video: Path, template: Path | None = None) -> int:
     except ImportError as error:
         print(f"rendering dependency unavailable ({error}); run setup_tools.py", file=sys.stderr)
         return 1
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError,
-            zipfile.BadZipFile) as error:
+    except (json.JSONDecodeError, UnicodeError) as error:
+        print(f"sheet render input is malformed: {error}", file=sys.stderr)
+        return 2
+    except SheetValidationError as error:
         print(f"sheet render failed: {error}", file=sys.stderr)
-        return 3 if isinstance(error, ValueError) else 1
+        return 3
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile) as error:
+        print(f"sheet render failed: {error}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
