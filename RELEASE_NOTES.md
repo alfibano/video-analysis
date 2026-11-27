@@ -1,5 +1,19 @@
 # Release notes — video-analysis
 
+## v0.6.4 — 2026-11-27 — self-test cleanup and key-sheet reuse
+
+### Changed
+- A fully passing self-test removes only folders created during that run under the resolved app temp
+  root. Any failed check preserves those folders and prints their locations for diagnosis. Cleanup
+  asserts that each target is strictly inside the app temp root.
+- Extraction reuses a contact sheet when a key page has the same ordered frame list. The manifest's
+  `stages.frames.key_sheet_index` lists every key page and points to either `keysheets/` or its reused
+  `sheets/` page. The index marks each reused contact sheet explicitly.
+
+### Measured
+- Default self-test: `DEFAULT_CHECKS=134` (134 passed, 0 failed); `--full`:
+  `FULL_CHECKS=136` (136 result rows, including two additional full-mode checks).
+
 ## v0.6.3 — 2026-11-27 — callouts as rounded boxes with image icons
 
 ### Changed

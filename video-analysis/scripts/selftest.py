@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import shutil
 import wave
 import zipfile
 from pathlib import Path
@@ -21,11 +22,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CHECKS=132
-FULL_CHECKS=134
+DEFAULT_CHECKS=134
+FULL_CHECKS=136
 CHILD_OUTPUT: list[str] = []
 LAST_EXTRACT_OUTPUT = ""
 CHECK_OUTPUTS: dict[str, str] = {}
+CREATED_TEMP_FOLDERS: list[Path] = []
 
 
 
@@ -33,6 +35,40 @@ def _temp_root() -> Path:
     """App temp root (VIDEO_ANALYSIS_TEMP_DIR or the installed video-analysis/_temp)."""
     from tools import app_temp_dir
     return app_temp_dir()
+
+
+def cleanup_created_folders(root: Path, folders: list[Path]) -> None:
+    """Remove only tracked folders strictly beneath the resolved app temp root."""
+    resolved_root = root.resolve()
+    contained: list[Path] = []
+    for folder in folders:
+        resolved = folder.resolve()
+        assert resolved != resolved_root and resolved.is_relative_to(resolved_root), (
+            f"refusing to remove path outside app temp root: {folder}")
+        contained.append(resolved)
+    top_level = [path for path in contained
+                 if not any(path != other and path.is_relative_to(other) for other in contained)]
+    for path in top_level:
+        if path.exists():
+            shutil.rmtree(path)
+
+
+def check_selftest_cleanup_guard() -> bool:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as outer:
+        root = Path(outer) / "app-temp"
+        nested = root / "run" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "file.txt").write_text("owned", encoding="utf-8")
+        cleanup_created_folders(root, [root / "run", nested])
+        if (root / "run").exists() or list(root.iterdir()):
+            return False
+        outside = Path(outer) / "user-video"
+        outside.mkdir()
+        try:
+            cleanup_created_folders(root, [outside])
+        except AssertionError:
+            return True
+        return False
 
 def check_tool_resolution() -> bool:
     try:
@@ -1473,6 +1509,31 @@ def check_adaptive_sampling_and_timestamp_names(folder: Path) -> bool:
             and params.get("frame_naming") == "pts_ms_v1")
 
 
+def check_key_sheet_reuses_contact_pages() -> bool:
+    from PIL import Image
+    from extract_video import build_key_sheets, build_sheets
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        frames_dir = root / "frames"
+        frames_dir.mkdir()
+        frames = []
+        for index in range(10):
+            frame = frames_dir / f"t{index:06d}.000.jpg"
+            Image.new("RGB", (160, 90), (index * 20, 40, 90)).save(frame, format="JPEG")
+            frames.append(frame)
+        stamps = {frame.name: float(index) for index, frame in enumerate(frames)}
+        contacts, keys = root / "sheets", root / "keysheets"
+        build_sheets(frames, contacts, 1, stamps)
+        index = build_key_sheets(frames, frames, keys, contacts, 1, stamps)
+        contact_hashes = {hashlib.sha256(path.read_bytes()).hexdigest() for path in contacts.glob("*.jpg")}
+        key_hashes = {hashlib.sha256(path.read_bytes()).hexdigest() for path in keys.glob("*.jpg")}
+        listed = [entry["path"] for entry in index]
+        return (not key_hashes.intersection(contact_hashes) and len(index) == 2
+                and all(entry["reused_contact_sheet"] for entry in index)
+                and listed == ["sheets/sheet00.jpg", "sheets/sheet01.jpg"]
+                and all((root / path).is_file() for path in listed))
+
+
 def check_fixed_interval_opt_out(folder: Path) -> bool:
     video = folder / "fixed.mp4"
     make_video(video)
@@ -2800,14 +2861,14 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_v060_documentation_and_release_contract() -> bool:
+def check_v064_documentation_and_release_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
     test_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
     docs = readme + skill + release + platform + test_docs
-    release_contract = "v0.6.0" in release and "2026-11-27" in release
+    release_contract = "v0.6.4" in release and "2026-11-27" in release
     comments = all(term in docs for term in ("--comments 0", "commenter identity", "without names"))
     language = all(term in docs for term in ("user's requested", "--language", "sheet language"))
     migration = "regenerate sheet.json with the v0.6.0 brief" in docs
@@ -2816,6 +2877,9 @@ def check_v060_documentation_and_release_contract() -> bool:
     editorial = all(term in docs.lower() for term in (
         "incontestable sources", "never debunk", "spirituality", "esotericism", "flagrant imprecision"))
     structure = all(term in docs.lower() for term in ("blocks", "callouts", "references", "several frames"))
+    extraction_updates = all(term in docs.lower() for term in (
+        "key_sheet_index", "reused contact sheet", "test folders removed", "retained for diagnosis",
+        "older manifests"))
     count_surfaces = [readme, release, test_docs, Path(__file__).read_text(encoding="utf-8")]
     count_pins = []
     for key in ("DEFAULT_CHECKS", "FULL_CHECKS"):
@@ -2827,7 +2891,7 @@ def check_v060_documentation_and_release_contract() -> bool:
             values.append(match.group(1))
         count_pins.append(len(set(values)) == 1)
     return all((release_contract, comments, language, migration, facts_cost,
-                editorial, structure, *count_pins))
+                editorial, structure, extraction_updates, *count_pins))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -3137,8 +3201,50 @@ def main() -> int:
                         help="also fetch and extract one real online video URL")
     args = parser.parse_args()
     from tools import make_temp_folder
+    temp_root = _temp_root().resolve()
+    CREATED_TEMP_FOLDERS.clear()
+    original_mkdtemp = tempfile.mkdtemp
+    original_temp_directory = tempfile.TemporaryDirectory
+    original_path_mkdir = Path.mkdir
+
+    def record_temp_folder(path: str | Path) -> None:
+        resolved = Path(path).resolve()
+        if resolved != temp_root and resolved.is_relative_to(temp_root):
+            CREATED_TEMP_FOLDERS.append(resolved)
+
+    def tracked_mkdtemp(*positional: object, **keywords: object) -> str:
+        created = original_mkdtemp(*positional, **keywords)
+        record_temp_folder(created)
+        return created
+
+    def tracked_path_mkdir(path: Path, *positional: object, **keywords: object) -> None:
+        missing: list[Path] = []
+        candidate = path
+        while not candidate.exists() and candidate != temp_root:
+            missing.append(candidate)
+            candidate = candidate.parent
+        original_path_mkdir(path, *positional, **keywords)
+        for created in reversed(missing):
+            record_temp_folder(created)
+
+    class TrackedTemporaryDirectory(original_temp_directory):
+        def cleanup(self) -> None:
+            if getattr(self, "name", None):
+                resolved = Path(self.name).resolve()
+                if resolved != temp_root and resolved.is_relative_to(temp_root):
+                    record_temp_folder(resolved)
+                    self._finalizer.detach()
+                    return
+            super().cleanup()
+
+    tempfile.mkdtemp = tracked_mkdtemp
+    tempfile.TemporaryDirectory = TrackedTemporaryDirectory
+    Path.mkdir = tracked_path_mkdir
+    created_main_folder = args.work_dir is None or not args.work_dir.exists()
     folder = args.work_dir or make_temp_folder("video-analysis-selftest-")
     folder.mkdir(parents=True, exist_ok=True)
+    if created_main_folder:
+        record_temp_folder(folder)
     video = folder / "synthetic video é.mp4"
     make_video(video)
     work = folder / "synthetic video é.analysis"
@@ -3186,6 +3292,10 @@ def main() -> int:
         checks["transcript files written"] = (work / "transcript.json").exists() and (work / "transcript.txt").exists()
     checks["build bundle writes JSON from extract outputs"] = run_check(
         "build bundle writes JSON from extract outputs", lambda: check_build_bundle(video))
+    checks["selftest cleanup removes tracked folders and refuses outside paths"] = run_check(
+        "selftest cleanup removes tracked folders and refuses outside paths", check_selftest_cleanup_guard)
+    checks["key-sheet pages reuse matching contact sheets and are indexed"] = run_check(
+        "key-sheet pages reuse matching contact sheets and are indexed", check_key_sheet_reuses_contact_pages)
     checks["downloaded video names are short and safe"] = run_check(
         "downloaded video names are short and safe", check_safe_video_stem)
     checks["bundle manifest resumes and conflicts safely"] = run_check(
@@ -3406,9 +3516,9 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["v0.6.0 documentation release and measured-count contract"] = run_check(
-            "v0.6.0 documentation release and measured-count contract",
-            check_v060_documentation_and_release_contract)
+        checks["v0.6.4 documentation extraction and measured-count contract"] = run_check(
+            "v0.6.4 documentation extraction and measured-count contract",
+            check_v064_documentation_and_release_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(
@@ -3428,8 +3538,16 @@ def main() -> int:
         if not passed and CHECK_OUTPUTS.get(name):
             for line in CHECK_OUTPUTS[name].rstrip().splitlines():
                 print(f"    {line}")
-    print(f"test folder (send to the Recycle Bin when done; _temp holds all test runs): {folder}")
-    return 0 if all(checks.values()) else 1
+    tempfile.mkdtemp = original_mkdtemp
+    tempfile.TemporaryDirectory = original_temp_directory
+    Path.mkdir = original_path_mkdir
+    if all(checks.values()):
+        cleanup_created_folders(temp_root, CREATED_TEMP_FOLDERS)
+        print("test folders removed")
+        return 0
+    retained = sorted({str(path) for path in CREATED_TEMP_FOLDERS if path.exists()})
+    print("test folders retained for diagnosis: " + (", ".join(retained) if retained else str(folder)))
+    return 1
 
 
 if __name__ == "__main__":

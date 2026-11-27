@@ -160,7 +160,7 @@ downloads one public video. Progress is bounded.
 |---|---|
 | `frames/` + `frames.json` | Sampled frames named by timestamp, `tSSSSSS.mmm.jpg` (e.g. `t000340.000.jpg`); `frames.json` holds the exact container timestamps and is authoritative. Sampling is adaptive by default: a base grid every `--interval` seconds (default 5) plus frames around screen changes detected at 1 fps; `--fixed-interval` opts out. |
 | `sheets/` | 3×3 contact sheets, each image stamped hh:mm:ss.mmm. |
-| `keyframes.txt` + `keysheets/` | Only the frames that visibly changed: one per slide or screen. |
+| `keyframes.txt` + `manifest.json` → `stages.frames.key_sheet_index` | Every key page and its path. A page reuses `sheets/sheetNN.jpg` when its ordered frame list matches a contact page; otherwise it is written under `keysheets/`. Older manifests without the index use `keysheets/`. |
 | `audio.wav` | 16 kHz mono audio track. |
 | `transcript.txt` + `transcript.json` | Offline Whisper transcript, `[mm:ss] text` (`--model`, default `small`; `--skip-transcript` to omit it). |
 | `at/` | Full-resolution frames at exact instants, `--at HH:MM:SS[.mmm]` (repeatable). |
@@ -266,9 +266,8 @@ The sheet copies `source.url` exactly from `bundle.json`; the renderer links onl
 
 ## Status
 
-v0.6.0 — measured default: `DEFAULT_CHECKS=132` (132 passed, 0 failed). The `--full` run measured
-`FULL_CHECKS=134`; in this sandbox, four checks depending on Whisper failed because the model snapshot
-was unavailable. See
+v0.6.4 — measured default: `DEFAULT_CHECKS=134` (134 passed, 0 failed). The `--full` run measured
+`FULL_CHECKS=136` (136 result rows, including two additional full-mode checks). See
 [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License

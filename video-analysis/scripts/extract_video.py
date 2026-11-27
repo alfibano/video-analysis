@@ -254,16 +254,46 @@ def build_sheets(frames: list[Path], folder: Path, interval: float, stamps: dict
     folder.mkdir(exist_ok=True)
     per_sheet = SHEET_COLUMNS * SHEET_ROWS
     for sheet_index, start in enumerate(range(0, len(frames), per_sheet)):
-        sheet = Image.new("RGB", (SHEET_COLUMNS * CELL_WIDTH, SHEET_ROWS * CELL_HEIGHT), "white")
-        draw = ImageDraw.Draw(sheet)
-        for cell, frame in enumerate(frames[start:start + per_sheet]):
-            x, y = (cell % SHEET_COLUMNS) * CELL_WIDTH, (cell // SHEET_COLUMNS) * CELL_HEIGHT
-            with Image.open(frame) as image:
-                sheet.paste(image.convert("RGB").resize((CELL_WIDTH, CELL_HEIGHT)), (x, y))
-            draw.rectangle([x, y, x + 74, y + 18], fill="yellow")
-            draw.text((x + 3, y + 3), frame_label(frame, interval, stamps), fill="black")
-        sheet.save(folder / f"sheet{sheet_index:02d}.jpg", quality=80)
+        _write_sheet_page(frames[start:start + per_sheet], folder / f"sheet{sheet_index:02d}.jpg",
+                          interval, stamps)
     return -(-len(frames) // per_sheet)
+
+
+def _write_sheet_page(frames: list[Path], target: Path, interval: float,
+                      stamps: dict[str, float]) -> None:
+    sheet = Image.new("RGB", (SHEET_COLUMNS * CELL_WIDTH, SHEET_ROWS * CELL_HEIGHT), "white")
+    draw = ImageDraw.Draw(sheet)
+    for cell, frame in enumerate(frames):
+        x, y = (cell % SHEET_COLUMNS) * CELL_WIDTH, (cell // SHEET_COLUMNS) * CELL_HEIGHT
+        with Image.open(frame) as image:
+            sheet.paste(image.convert("RGB").resize((CELL_WIDTH, CELL_HEIGHT)), (x, y))
+        draw.rectangle([x, y, x + 74, y + 18], fill="yellow")
+        draw.text((x + 3, y + 3), frame_label(frame, interval, stamps), fill="black")
+    sheet.save(target, quality=80)
+
+
+def build_key_sheets(keys: list[Path], frames: list[Path], key_folder: Path,
+                     contact_folder: Path, interval: float,
+                     stamps: dict[str, float]) -> list[dict[str, object]]:
+    """Write unique key pages and index pages reused from the contact sheets."""
+    per_sheet = SHEET_COLUMNS * SHEET_ROWS
+    contact_pages = [frames[start:start + per_sheet] for start in range(0, len(frames), per_sheet)]
+    index: list[dict[str, object]] = []
+    for page_number, start in enumerate(range(0, len(keys), per_sheet)):
+        page = keys[start:start + per_sheet]
+        reused = next((number for number, contact in enumerate(contact_pages)
+                       if [frame.name for frame in page] == [frame.name for frame in contact]
+                       and (contact_folder / f"sheet{number:02d}.jpg").is_file()), None)
+        if reused is None:
+            key_folder.mkdir(exist_ok=True)
+            path = key_folder / f"sheet{page_number:02d}.jpg"
+            _write_sheet_page(page, path, interval, stamps)
+            relative = f"keysheets/{path.name}"
+        else:
+            relative = f"sheets/sheet{reused:02d}.jpg"
+        index.append({"page": page_number, "path": relative,
+                      "frames": [frame.name for frame in page], "reused_contact_sheet": reused is not None})
+    return index
 
 
 def key_frames(frames: list[Path], threshold: float) -> list[Path]:
@@ -437,8 +467,11 @@ def run(args: argparse.Namespace) -> None:
         keys = key_frames(frames, args.dedup_threshold)
         (work / "keyframes.txt").write_text(
             "".join(f"{frame_label(k, args.interval, stamps)}  frames/{k.name}\n" for k in keys), encoding="utf-8")
-        key_sheets = build_sheets(keys, work / "keysheets", args.interval, stamps)
-        stages["frames"] = {"frames": count, "sheets": sheets, "keyframes": len(keys), "keysheets": key_sheets}
+        key_sheet_index = build_key_sheets(keys, frames, work / "keysheets", work / "sheets",
+                                           args.interval, stamps)
+        key_sheets = sum(not entry["reused_contact_sheet"] for entry in key_sheet_index)
+        stages["frames"] = {"frames": count, "sheets": sheets, "keyframes": len(keys),
+                             "keysheets": key_sheets, "key_sheet_index": key_sheet_index}
         save_manifest(work, manifest)
         print(f"frames {count} | sheets {sheets} | key frames {len(keys)}")
 

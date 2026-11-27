@@ -214,7 +214,8 @@ frame at an exact instant — used in step 3d).
 
 Produces in `<video>.analysis\`: `frames\` (every interval) with their exact container timestamps
 in `frames.json`, `sheets\` (3x3 contact sheets, each image stamped hh:mm:ss.mmm in yellow),
-`keyframes.txt` + `keysheets\` (only frames that visibly changed — the slide/screen changes),
+`keyframes.txt` + `stages.frames.key_sheet_index` in `manifest.json` (key pages point to
+`keysheets\` or reuse an identical-frame-list page in `sheets\`),
 `audio.wav`, `transcript.txt` (`[mm:ss] text`) + `transcript.json`, `at\`, `manifest.json`. Re-running resumes and skips finished stages; changed extraction parameters or a
 different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = processing failure,
 2 = bad input.
@@ -240,7 +241,9 @@ frame; an empty string means it was scanned without finding text.
 a. **The speech**: each chapter's `speech_text` in `bundle.json`, else the whole transcript
    (`transcript.txt`). In courses and demos, the decisive content (numbers, rules, exceptions,
    the real method) is very often **in the voice, not on screen**.
-b. **The key-frame sheets** (`keysheets\`) to see each distinct slide/screen once.
+b. **The key-frame pages**, following each `path` in `manifest.json` →
+   `stages.frames.key_sheet_index`. A page can be in `keysheets\` or reuse a matching contact page
+   in `sheets\` (`reused_contact_sheet: true`). Older manifests without this index use `keysheets\`.
 c. **The contact sheets** (`sheets\`) — all of them, in order, to follow what moves between key
    frames (cursor, drawings, charts updating).
 d. **Zoom where the speech points**: when the speaker says "here", "this candle", "look at…",

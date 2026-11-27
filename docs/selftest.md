@@ -105,14 +105,19 @@ not required because ZIP metadata and relationship ordering vary.
 | Rendering and templates | `default DOCX renders facts accounting context blocks callouts and references`; facts formatting, omitted empty/duplicate facts, one-row description links, localized cost labels, schema-v1 refusal, hyperlinks, tables, borders, shading, template preservation |
 | Resume safety | `sheet render rerun preserves user-edited DOCX`; `changed sheet rerenders owned DOCX atomically and preserves edited DOCX` (recorded output SHA-256, same-name replacement, temp cleanup, and replacement failure); `untracked DOCX is refused`; `sheet render requires successful preparation`; `sheet render rejects changed bundle digest` |
 | Setup | `setup maps docx import to python-docx` |
-| Documentation | `v0.6.0 documentation release and measured-count contract` |
+| Extraction | `key-sheet pages reuse matching contact sheets and are indexed`; verifies ordered page reuse and SHA-256 uniqueness across `keysheets/` and `sheets/` |
+| Cleanup | `selftest cleanup removes tracked folders and refuses outside paths`; verifies nested owned folders under a `TemporaryDirectory` are removed and an outside path triggers the guard |
+| Documentation | `v0.6.4 documentation extraction and measured-count contract` |
 
 The check named `default DOCX render has ordered content images and properties` also verifies that
 built-in-template hyperlink runs have visible formatting when no `Hyperlink` character style exists.
 Source links must match `bundle.json` and use a safe HTTP(S) URL; unsafe values remain plain text.
-Measured release totals: `DEFAULT_CHECKS=132` (132 passed, 0 failed); `FULL_CHECKS=134` result rows.
-The sandbox full run had four Whisper-dependent failures because the requested model snapshot was not
-cached; all other checks passed. `--full` needs the Whisper model available locally.
+Measured release totals: `DEFAULT_CHECKS=134` (134 passed, 0 failed); `FULL_CHECKS=136` result rows
+(the two full-mode transcription checks add to the default total).
+On a green run, the self-test removes only tracked folders it created inside the app temp root and prints
+`test folders removed`. When any check fails, it prints `test folders retained for diagnosis` followed
+by their paths. `key_sheet_index` in the extraction manifest points readers to every key page, including
+pages reused from the contact sheets.
 
 The two refusal checks matter: a guard that has never been seen refusing proves nothing.
 
