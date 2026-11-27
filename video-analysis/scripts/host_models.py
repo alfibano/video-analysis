@@ -102,9 +102,8 @@ def _claude_low(environ: Mapping[str, str], default: str | None,
         if environ.get(name):
             return environ[name], f"from {name}"
     if not base_url:
-        native_aliases = {"haiku", "sonnet", "sonnet[1m]", "opus", "opus[1m]", "default"}
-        if default and (default.casefold() in native_aliases or "haiku" in default.casefold()):
-            return default, "configured native Claude alias already selected"
+        if default and "haiku" in default.casefold():
+            return default, "configured model already has the low-cost role"
         return "haiku", "native Claude haiku alias; no custom base URL"
     return _family_sibling("anthropic", default, "low_cost")
 
@@ -146,8 +145,10 @@ def _openclaw_path(environ: Mapping[str, str], reader: ConfigReader) -> Path:
 
 
 def _openclaw_values(source: str | None) -> tuple[str | None, str, str | None, str]:
+    if not source or not source.strip():
+        return None, "unknown", None, "no OpenClaw config found"
     try:
-        config = json.loads(_normalize_json5(source or ""))
+        config = json.loads(_normalize_json5(source))
     except (json.JSONDecodeError, ValueError):
         return None, "unknown", None, "OpenClaw config was malformed"
     model = _nested(config, "agents", "defaults", "model", "primary")

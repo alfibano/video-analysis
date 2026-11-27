@@ -1791,7 +1791,7 @@ def check_v040_documentation_and_release_contract() -> bool:
     openclaw = all(term in docs + release for term in ("infer model run", "--prompt-stdin",
                                                         "UNVERIFIED-LIVE"))
     migration = all(term in docs + release for term in ("exit 3", "v0.3.0", "rerun"))
-    release_contract = all(term in release for term in ("v0.4.0", "2026-11-27", "89/89", "91/91",
+    release_contract = all(term in release for term in ("v0.4.0", "2026-11-27", "88/88", "90/90",
                                                          "fake runner"))
     historical = release.split("## v0.3.0", 1)[-1].split("## v0.2.1", 1)[0]
     historical_models = all(term in historical for term in ("2026-11-27", "Haiku", "Luna",
@@ -1841,9 +1841,13 @@ def check_claude_model_resolution_precedence() -> bool:
     cheap_old = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_SMALL_FAST_MODEL": "old"}, reader, ExplicitInput())
     native = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-sonnet-4"}, reader, ExplicitInput())
     native_without_model = resolve_host_model(marked, ConfigReader(cwd, home, lambda _: None), ExplicitInput())
-    native_aliases = [(model, resolve_host_model({**marked, "ANTHROPIC_MODEL": model}, reader, ExplicitInput()))
-                      for model in ("haiku", "sonnet", "sonnet[1m]", "opus", "opus[1m]", "default", "opusplan")]
-    already_haiku = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-haiku-4"}, reader, ExplicitInput())
+    native_defaults = [(model, resolve_host_model(
+        {**marked, **({"ANTHROPIC_MODEL": model} if model is not None else {})},
+        reader if model is not None else ConfigReader(cwd, home, lambda _: None), ExplicitInput()))
+        for model in ("opus[1m]", "sonnet", "default", None, "sonnet[1m]", "opus", "opusplan",
+                      "claude-sonnet-4", "claude-opus-4")]
+    haiku_defaults = [(model, resolve_host_model({**marked, "ANTHROPIC_MODEL": model}, reader, ExplicitInput()))
+                      for model in ("haiku", "claude-haiku-4")]
     custom_glm = resolve_host_model({**marked, "ANTHROPIC_MODEL": "glm-5.3",
                                      "ANTHROPIC_BASE_URL": "https://custom.invalid"}, reader, ExplicitInput())
     custom = resolve_host_model({**marked, "ANTHROPIC_MODEL": "vendor-special-model",
@@ -1854,9 +1858,10 @@ def check_claude_model_resolution_precedence() -> bool:
             and cheap_env.low_cost_model == "cheap" and cheap_old.low_cost_model == "old"
             and native.low_cost_model == "haiku" and custom.low_cost_model is None
             and native_without_model.low_cost_model == "haiku"
-            and all(item.low_cost_model == model for model, item in native_aliases[:-1])
-            and native_aliases[-1][1].low_cost_model == "haiku"
-            and already_haiku.low_cost_model == "claude-haiku-4"
+            and all(item.low_cost_model == "haiku" for _, item in native_defaults)
+            and all(item.low_cost_model == model and
+                    dict(item.reasons).get("low_cost_model") == "configured model already has the low-cost role"
+                    for model, item in haiku_defaults)
             and custom_glm.low_cost_model == "GLM-5.3-Flash"
             and empty.default_model is None)
 
@@ -1922,13 +1927,22 @@ def check_openclaw_json5_resolution() -> bool:
     home_result = resolve_host_model({}, reader, ExplicitInput(host="openclaw"))
     malformed = resolve_host_model(env, ConfigReader(cwd, Path("/home"), lambda _: "{broken"),
                                     ExplicitInput(host="openclaw"))
+    empty = resolve_host_model(env, ConfigReader(cwd, Path("/home"), lambda _: ""),
+                               ExplicitInput(host="openclaw"))
+    absent = resolve_host_model(env, ConfigReader(cwd, Path("/home"), lambda _: None),
+                                ExplicitInput(host="openclaw"))
     missing = resolve_host_model({}, ConfigReader(cwd, Path("/home"), lambda _: "{}"),
                                  ExplicitInput(host="openclaw"))
     return (result.default_model == "anthropic/claude-sonnet-4" and result.provider == "anthropic"
             and result.endpoint_identity == "https://example.invalid/v1"
             and state_result.default_model == "qwen/qwen3-max"
             and home_result.default_model == "qwen/qwen3-max"
-            and malformed.default_model is None and missing.default_model is None
+            and malformed.default_model is None
+            and dict(malformed.reasons).get("default_model") == "OpenClaw config was malformed"
+            and empty.default_model is None and absent.default_model is None
+            and dict(empty.reasons).get("default_model") == "no OpenClaw config found"
+            and dict(absent.reasons).get("default_model") == "no OpenClaw config found"
+            and missing.default_model is None
             and "secret" not in repr(result))
 
 

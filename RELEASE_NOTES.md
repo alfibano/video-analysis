@@ -28,7 +28,7 @@
   uses an offline fake runner.
 
 ### Measured
-- Self-test: default 89/89; `--full` 91/91.
+- Self-test: default 88/88; `--full` 90/90.
 
 ## v0.3.0 — 2026-11-27 — transcript correction
 
