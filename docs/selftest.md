@@ -100,13 +100,14 @@ not required because ZIP metadata and relationship ordering vary.
 |---|---|
 | Schema | `sheet schema accepts valid v1`; `sheet schema rejects missing and unknown fields with named errors`; `sheet schema rejects wrong types and empty required text`; `sheet schema rejects invalid chapter intervals`; `sheet schema rejects unordered and overlapping chapters`; `sheet schema rejects frame time outside its chapter`; `sheet schema blocks absolute drive traversal and non-normal frame paths`; `sheet schema rejects missing frame files`; `sheet schema rejects stale bundle digest`; `sheet schema rejects writer identity mismatch`; `seek links cover YouTube Vimeo and unsupported sources` |
 | Preparation and consent | `sheet preparation uses host default model provenance`; `sheet preparation consent matrix enforces write boundaries`; `sheet brief contains exact schema and writer values`; `sheet preparation resumes and conflicts safely` |
-| Rendering and templates | `default DOCX render has ordered content images and properties`; `DOCX render emits only supported seek hyperlinks`; `DOCX template reuses styles headers footers and section properties`; `DOTX template renders as document content type`; `missing template styles fall back to Normal` |
+| Rendering and templates | `default DOCX render has ordered content images and properties`; `sheet source URL must match bundle and be a safe web link`; `DOCX template reuses styles headers footers and section properties`; `DOTX template renders as document content type`; `missing template styles fall back to Normal` |
 | Resume safety | `sheet render rerun preserves user-edited DOCX`; `changed sheet refuses and leaves DOCX untouched`; `untracked DOCX is refused`; `sheet render requires successful preparation`; `sheet render rejects changed bundle digest` |
 | Setup | `setup maps docx import to python-docx` |
 | Documentation | `v0.5.0 documentation release and measured-count contract` |
 
 The check named `default DOCX render has ordered content images and properties` also verifies that
 built-in-template hyperlink runs have visible formatting when no `Hyperlink` character style exists.
+Source links must match `bundle.json` and use a safe HTTP(S) URL; unsafe values remain plain text.
 Measured release totals: `DEFAULT_CHECKS=114` (114 passed, 0 failed); `FULL_CHECKS=116`
 (116 passed, 0 failed).
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -63,8 +64,24 @@ def format_hhmmss(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def is_safe_web_url(url: str | None) -> bool:
+    if (not isinstance(url, str) or not url.strip() or "\\" in url
+            or any(char.isspace() or unicodedata.category(char) == "Cc" for char in url)):
+        return False
+    try:
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return False
+        if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+            return False
+        _ = parts.port
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def build_seek_link(source_url: str | None, seconds: float) -> str | None:
-    if (not isinstance(source_url, str) or not source_url.strip()
+    if (not is_safe_web_url(source_url)
             or isinstance(seconds, bool) or not isinstance(seconds, (int, float))
             or not math.isfinite(seconds) or seconds < 0):
         return None
@@ -130,7 +147,7 @@ def _frame_path(value: Any, analysis_dir: Path, field: str) -> Path:
     return resolved
 
 
-def _validate_source(source: Any, expected_digest: str) -> None:
+def _validate_source(source: Any, expected_digest: str, expected_source_url: str | None) -> None:
     _keys(source, ("bundle_sha256", "title", "url"), "source")
     if not isinstance(source["bundle_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", source["bundle_sha256"]):
         _fail("source.bundle_sha256", "must be a non-empty string")
@@ -139,6 +156,8 @@ def _validate_source(source: Any, expected_digest: str) -> None:
         _fail("source.url", "must be null or a non-empty string")
     if source["bundle_sha256"] != expected_digest:
         _fail("source.bundle_sha256", "does not match current bundle.json")
+    if source["url"] != expected_source_url:
+        _fail("source.url", "does not match current bundle.json")
 
 
 def _validate_labels(labels: Any) -> None:
@@ -200,11 +219,11 @@ def _validate_glossary(glossary: Any) -> None:
 
 
 def validate_sheet(value: Any, *, analysis_dir: Path, expected_bundle_sha256: str,
-                   expected_writer: Mapping[str, Any]) -> dict[str, Any]:
+                   expected_writer: Mapping[str, Any], expected_source_url: str | None) -> dict[str, Any]:
     _keys(value, tuple(SHEET_JSON_SCHEMA_V1["required"]), "$")
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         _fail("schema_version", "must be schema version 1")
-    _validate_source(value["source"], expected_bundle_sha256)
+    _validate_source(value["source"], expected_bundle_sha256, expected_source_url)
     for field in ("language", "title", "introduction", "summary"):
         _text(value[field], field)
     _validate_labels(value["labels"])
@@ -215,10 +234,11 @@ def validate_sheet(value: Any, *, analysis_dir: Path, expected_bundle_sha256: st
 
 
 def load_sheet(path: Path, *, analysis_dir: Path, expected_bundle_sha256: str,
-               expected_writer: Mapping[str, Any]) -> dict[str, Any]:
+               expected_writer: Mapping[str, Any], expected_source_url: str | None) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         _fail("$", "invalid JSON")
     return validate_sheet(value, analysis_dir=analysis_dir,
-                          expected_bundle_sha256=expected_bundle_sha256, expected_writer=expected_writer)
+                          expected_bundle_sha256=expected_bundle_sha256, expected_writer=expected_writer,
+                          expected_source_url=expected_source_url)

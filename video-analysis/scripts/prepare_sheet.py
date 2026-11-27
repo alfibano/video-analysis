@@ -84,6 +84,7 @@ Read `{(analysis / 'bundle.json').resolve()}` and selected chapter frames before
 Write only valid UTF-8 JSON to `{(analysis / 'sheet.json').resolve()}`. Do not create or edit other files.
 
 Bundle SHA-256: `{digest}`
+Copy `bundle.json` `source.url` exactly into `sheet.json` `source.url`; use `null` when it is absent.
 Host: `{params['host']}`
 Model: `{params['model']}`
 Provider: `{params['provider']}`

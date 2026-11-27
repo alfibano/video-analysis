@@ -11,6 +11,7 @@
   speech language.
 - Built-in rendering and user `.docx` / `.dotx` templates preserve editable Word content. Supported
   YouTube and Vimeo sources receive timestamp seek links.
+- Source URLs must match `bundle.json`; only safe HTTP(S) URLs become clickable DOCX links.
 - Manifest resume identity and no-overwrite behavior protect existing DOCX files. Added
   `python-docx` as a rendering dependency and 27 offline sheet checks.
 

@@ -387,7 +387,8 @@ def _sheet_fixture(root: Path) -> tuple[Path, Path, dict, dict]:
     frames.mkdir(parents=True)
     frame = frames / "frame.jpg"
     frame.write_bytes(b"frame")
-    bundle = {"speech": {"language": "fr"}, "chapters": []}
+    bundle = {"source": {"url": "https://youtu.be/abc"},
+              "speech": {"language": "fr"}, "chapters": []}
     (analysis / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
     digest = hashlib.sha256((analysis / "bundle.json").read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
@@ -407,9 +408,11 @@ def _sheet_error(value: dict, analysis: Path, writer: dict, field: str, reason: 
                  digest: str | None = None) -> bool:
     from sheet_schema import SheetValidationError, validate_sheet
     current_digest = digest or value["source"]["bundle_sha256"]
+    bundle = json.loads((analysis / "bundle.json").read_text(encoding="utf-8"))
+    expected_url = bundle.get("source", {}).get("url")
     try:
         validate_sheet(value, analysis_dir=analysis, expected_bundle_sha256=current_digest,
-                       expected_writer=writer)
+                       expected_writer=writer, expected_source_url=expected_url)
     except SheetValidationError as error:
         return (error.field, error.reason) == (field, reason)
     return False
@@ -440,7 +443,8 @@ def check_sheet_schema_valid() -> bool:
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         accepted = validate_sheet(sheet, analysis_dir=analysis,
-            expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer)
+            expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer,
+            expected_source_url="https://youtu.be/abc")
         return (accepted == sheet and set(accepted["labels"]) == {
             "source", "introduction", "summary", "glossary", "figure"}
             and format_hhmmss(360000.9) == "100:00:00")
@@ -535,7 +539,10 @@ def check_sheet_seek_links() -> bool:
             and build_seek_link("https://youtu.be/x?feature=y", 10) == "https://youtu.be/x?feature=y&t=10s"
             and build_seek_link("https://vimeo.com/123?share=1#old", 11) == "https://vimeo.com/123?share=1#t=11s"
             and build_seek_link("https://example.com/video", 12) is None
-            and build_seek_link("https://vimeo.com/", 12) is None)
+            and build_seek_link("https://vimeo.com/", 12) is None
+            and all(build_seek_link(url, 12) is None for url in (
+                "file:///etc/passwd", r"\\host\share", "javascript:alert(1)",
+                "http://user:pw@host/video", "https://host/video\n")))
 
 
 def check_sheet_prepare_default_provenance() -> bool:
@@ -590,6 +597,7 @@ def check_sheet_prepare_brief_contract() -> bool:
         return (json.dumps(SHEET_JSON_SCHEMA_V1, ensure_ascii=False, indent=2) in brief
             and str((analysis / "bundle.json").resolve()) in brief
             and str((analysis / "sheet.json").resolve()) in brief
+            and "Copy `bundle.json` `source.url` exactly" in brief
             and params["host"] in brief and params["model"] in brief
             and "low-cost" in brief and "do not call a provider" in brief.lower()
             and manifest["stages"]["sheet_prepare"]["consent"] == {
@@ -621,7 +629,8 @@ def _render_fixture(root: Path, *, prepared: bool = True) -> tuple[Path, Path, d
     (analysis / "frames").mkdir()
     Image.new("RGB", (12, 8), "red").save(analysis / "frames" / "frame.png")
     bundle_path = analysis / "bundle.json"
-    bundle_path.write_text(json.dumps({"speech": {"language": "fr"}}), encoding="utf-8")
+    bundle_path.write_text(json.dumps({"source": {"url": "https://youtu.be/abc"},
+                                       "speech": {"language": "fr"}}), encoding="utf-8")
     digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
     sheet = {"schema_version": 1, "source": {"bundle_sha256": digest, "title": "Sample",
@@ -698,8 +707,9 @@ def check_default_docx_render() -> bool:
             and doc.core_properties.modified == FIXED_CORE_TIME)
 
 
-def check_docx_hyperlinks() -> bool:
-    from render_sheet import render_document
+def check_sheet_source_url_security() -> bool:
+    from render_sheet import render_document, run_render
+    from sheet_schema import SheetValidationError, validate_sheet
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
         supported = render_document(sheet, analysis_dir=analysis)
@@ -707,10 +717,32 @@ def check_docx_hyperlinks() -> bool:
         if supported_targets != ["https://youtu.be/abc", "https://youtu.be/abc?t=1s",
                                  "https://youtu.be/abc?t=2s"]:
             return False
-        sheet["source"]["url"] = "https://example.invalid/video"
-        doc = render_document(sheet, analysis_dir=analysis)
-        targets = [rel.target_ref for rel in doc.part.rels.values() if rel.is_external]
-        return targets == ["https://example.invalid/video"]
+        expected_writer = sheet["writer"]
+        digest = sheet["source"]["bundle_sha256"]
+        mismatching = dict(sheet)
+        mismatching["source"] = {**sheet["source"], "url": "https://example.invalid/video"}
+        try:
+            validate_sheet(mismatching, analysis_dir=analysis, expected_bundle_sha256=digest,
+                           expected_writer=expected_writer, expected_source_url="https://youtu.be/abc")
+        except SheetValidationError as error:
+            if (error.field, error.reason) != ("source.url", "does not match current bundle.json"):
+                return False
+        else:
+            return False
+        for unsafe in ("file:///etc/passwd", r"\\host\share", "javascript:alert(1)",
+                       "http://user:pw@host/video"):
+            unsafe_sheet = {**sheet, "source": {**sheet["source"], "url": unsafe}}
+            document = render_document(unsafe_sheet, analysis_dir=analysis)
+            targets = [rel.target_ref for rel in document.part.rels.values() if rel.is_external]
+            source_line = document.paragraphs[1]
+            if targets or source_line._p.xpath(".//w:hyperlink"):
+                return False
+        video, _, _ = _render_fixture(Path(temp) / "mismatch")
+        mismatch_analysis = video.parent / "sample.analysis"
+        mismatch_sheet = json.loads((mismatch_analysis / "sheet.json").read_text(encoding="utf-8"))
+        mismatch_sheet["source"]["url"] = "https://example.invalid/video"
+        (mismatch_analysis / "sheet.json").write_text(json.dumps(mismatch_sheet), encoding="utf-8")
+        return run_render(video) == 3 and not (mismatch_analysis / "sample.docx").exists()
 
 
 def check_docx_template_preservation() -> bool:
@@ -2622,8 +2654,8 @@ def main() -> int:
             "sheet preparation resumes and conflicts safely", check_sheet_prepare_resume_conflicts)
         checks["default DOCX render has ordered content images and properties"] = run_check(
             "default DOCX render has ordered content images and properties", check_default_docx_render)
-        checks["DOCX render emits only supported seek hyperlinks"] = run_check(
-            "DOCX render emits only supported seek hyperlinks", check_docx_hyperlinks)
+        checks["sheet source URL must match bundle and be a safe web link"] = run_check(
+            "sheet source URL must match bundle and be a safe web link", check_sheet_source_url_security)
         checks["DOCX template reuses styles headers footers and section properties"] = run_check(
             "DOCX template reuses styles headers footers and section properties", check_docx_template_preservation)
         checks["DOTX template renders as document content type"] = run_check(

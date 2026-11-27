@@ -245,6 +245,7 @@ missing input, exit 3 means invalid sheet or a state/output conflict, and exit 4
 consent is required or render preparation is missing. Existing DOCX files are never overwritten;
 rename or move one before rerendering after a conflict. Preparation, host writing, and rendering are
 separate from `analyze_video.py`, which stops at `bundle.json`.
+The sheet copies `source.url` exactly from `bundle.json`; the renderer links only safe HTTP(S) URLs.
 
 ## Status
 

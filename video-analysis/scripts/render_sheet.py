@@ -119,14 +119,19 @@ def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, An
 
 def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path,
                     template: Path | None = None):
+    from sheet_schema import is_safe_web_url
     document = _document_from_template(template)
     _clear_body(document)
     _paragraph(document, sheet["title"], "Title")
     source = _paragraph(document, style="Normal")
     source.add_run(sheet["labels"]["source"] + ": " + sheet["source"]["title"])
-    if sheet["source"].get("url"):
+    source_url = sheet["source"].get("url")
+    if source_url:
         source.add_run(" (")
-        _hyperlink(source, sheet["source"]["url"], sheet["source"]["url"])
+        if is_safe_web_url(source_url):
+            _hyperlink(source, source_url, source_url)
+        else:
+            source.add_run(source_url)
         source.add_run(")")
     for field in ("introduction", "summary"):
         _paragraph(document, sheet["labels"][field], "Heading 1")
@@ -197,10 +202,16 @@ def _prepared_sheet(manifest_path: Path, bundle_path: Path, sheet_path: Path,
     bundle_digest = _digest(bundle_path)
     if prep_params.get("bundle_sha256") != bundle_digest:
         raise _RenderError(3, "bundle digest changed since sheet preparation")
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle_source = bundle.get("source") if isinstance(bundle, dict) else None
+    expected_source_url = bundle_source.get("url") if isinstance(bundle_source, dict) else None
+    if expected_source_url is not None and not isinstance(expected_source_url, str):
+        raise _RenderError(3, "bundle source URL is invalid")
     from sheet_schema import load_sheet
     expected = {"host": prep_params.get("host"), "model": prep_params.get("model"), "role": "default"}
     return manifest, bundle_digest, load_sheet(sheet_path, analysis_dir=analysis,
-        expected_bundle_sha256=bundle_digest, expected_writer=expected)
+        expected_bundle_sha256=bundle_digest, expected_writer=expected,
+        expected_source_url=expected_source_url)
 
 
 def _render_params(sheet_path: Path, template: Path | None) -> dict[str, Any]:
