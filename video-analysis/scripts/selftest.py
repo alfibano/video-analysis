@@ -1537,6 +1537,170 @@ def check_documentation_contract_current() -> bool:
     return all(term in readme + skill for term in ("claude-code", "codex", "--retry-refused", "schema 2"))
 
 
+def check_host_detection_and_provenance() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    except ImportError:
+        return False
+    reader = ConfigReader(Path("/project"), Path("/home"), lambda _: None)
+    explicit = resolve_host_model({"VIDEO_ANALYSIS_HOST": "codex", "CLAUDECODE": "1"}, reader,
+                                  ExplicitInput(host="openclaw"))
+    detected = [resolve_host_model(env, reader, ExplicitInput()) for env in
+                ({"VIDEO_ANALYSIS_HOST": "codex"}, {"CLAUDECODE": "1"}, {"CODEX_SESSION_ID": "x"}, {})]
+    return (explicit.host == "openclaw" and [item.host for item in detected] ==
+            ["codex", "claude-code", "codex", "unknown"]
+            and "explicit" in dict(explicit.reasons).get("host", "").lower()
+            and all(item.host != "openclaw" for item in detected))
+
+
+def check_claude_model_resolution_precedence() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    except ImportError:
+        return False
+    cwd, home = Path("/project"), Path("/home")
+    files = {cwd / ".claude/settings.local.json": '{"model":"local"}',
+             cwd / ".claude/settings.json": '{"model":"project"}',
+             home / ".claude/settings.json": '{"model":"user"}'}
+    reader = ConfigReader(cwd, home, lambda path: files.get(path))
+    marked = {"CLAUDECODE": "1"}
+    local = resolve_host_model(marked, reader, ExplicitInput())
+    project_reader = ConfigReader(cwd, home,
+                                  lambda path: None if path == cwd / ".claude/settings.local.json" else files.get(path))
+    project = resolve_host_model(marked, project_reader, ExplicitInput())
+    user_reader = ConfigReader(cwd, home,
+                               lambda path: files.get(path) if path == home / ".claude/settings.json" else None)
+    user = resolve_host_model(marked, user_reader, ExplicitInput())
+    env = resolve_host_model({**marked, "ANTHROPIC_MODEL": "env"}, reader, ExplicitInput())
+    cheap_env = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "cheap"}, reader, ExplicitInput())
+    cheap_old = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_SMALL_FAST_MODEL": "old"}, reader, ExplicitInput())
+    native = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-sonnet-4"}, reader, ExplicitInput())
+    custom = resolve_host_model({**marked, "ANTHROPIC_MODEL": "vendor-special-model",
+                                 "ANTHROPIC_BASE_URL": "https://custom.invalid"}, reader, ExplicitInput())
+    empty = resolve_host_model(marked, ConfigReader(cwd, home, lambda _: None), ExplicitInput())
+    return (local.default_model == "local" and project.default_model == "project"
+            and user.default_model == "user" and env.default_model == "env"
+            and cheap_env.low_cost_model == "cheap" and cheap_old.low_cost_model == "old"
+            and native.low_cost_model == "haiku" and custom.low_cost_model is None
+            and empty.default_model is None)
+
+
+def check_codex_model_resolution_precedence() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    except ImportError:
+        return False
+    home = Path("/codex-home")
+    base = ('profile="work"\n[model_providers.test]\nbase_url="https://u:secret@example.invalid/v1?key=x"\n'
+            '[profiles.work]\nmodel="gpt-6-luna"\nmodel_provider="test"\n')
+    overlay = 'model="gpt-5.6-sol"\noss_provider="ollama"\n'
+    files = {home / "config.toml": base, home / "work.config.toml": overlay}
+    reader = ConfigReader(Path("/project"), Path("/home"), lambda path: files.get(path))
+    result = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(home)}, reader, ExplicitInput())
+    reason = dict(result.reasons).get("default_model", "").lower()
+    endpoint_config = ('model="gpt-6-luna"\nmodel_provider="test"\n'
+                       '[model_providers.test]\nbase_url="https://u:secret@example.invalid/v1?key=x"\n')
+    url_result = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(home)},
+                                    ConfigReader(Path("/project"), Path("/home"),
+                                                 lambda path: endpoint_config if path == home / "config.toml" else None),
+                                    ExplicitInput())
+    default_home = Path("/home/.codex")
+    home_config = 'model="gpt-6-luna"\nmodel_provider="test"\n'
+    default_result = resolve_host_model({"CODEX_SESSION_ID": "x"},
+                                        ConfigReader(Path("/project"), Path("/home"),
+                                                     lambda path: home_config if path == default_home / "config.toml" else None),
+                                        ExplicitInput())
+    return (result.default_model == "gpt-5.6-sol" and result.provider == "ollama"
+            and result.locality == "local" and result.endpoint_identity == "provider:ollama"
+            and url_result.endpoint_identity == "https://example.invalid/v1"
+            and default_result.default_model == "gpt-6-luna"
+            and all(flag in reason for flag in ("configured default", "--oss", "-m", "--profile"))
+            and "secret" not in repr(result))
+
+
+def check_openclaw_json5_resolution() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    except ImportError:
+        return False
+    cwd, state = Path("/project"), Path("/state")
+    path = cwd / "openclaw.json"
+    document = """{ // line comment\n /* block comment */ agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4', }, }, },
+ providers: { anthropic: { baseUrl: 'https://u:secret@example.invalid/v1?token=x#frag', }, }, note: 'literal // marker,}', }"""
+    home_path = Path("/home/.openclaw/openclaw.json")
+    state_path = state / "openclaw.json"
+    alternate = '{agents:{defaults:{model:{primary:"qwen/qwen3-max"}}}}'
+    files = {path: document, state_path: alternate, home_path: alternate}
+    reader = ConfigReader(cwd, Path("/home"), lambda candidate: files.get(candidate))
+    env = {"OPENCLAW_CONFIG_PATH": str(path), "OPENCLAW_STATE_DIR": str(state)}
+    result = resolve_host_model(env, reader, ExplicitInput(host="openclaw"))
+    state_result = resolve_host_model({"OPENCLAW_STATE_DIR": str(state)}, reader,
+                                      ExplicitInput(host="openclaw"))
+    home_result = resolve_host_model({}, reader, ExplicitInput(host="openclaw"))
+    malformed = resolve_host_model(env, ConfigReader(cwd, Path("/home"), lambda _: "{broken"),
+                                    ExplicitInput(host="openclaw"))
+    missing = resolve_host_model({}, ConfigReader(cwd, Path("/home"), lambda _: "{}"),
+                                 ExplicitInput(host="openclaw"))
+    return (result.default_model == "anthropic/claude-sonnet-4" and result.provider == "anthropic"
+            and result.endpoint_identity == "https://example.invalid/v1"
+            and state_result.default_model == "qwen/qwen3-max"
+            and home_result.default_model == "qwen/qwen3-max"
+            and malformed.default_model is None and missing.default_model is None
+            and "secret" not in repr(result))
+
+
+def check_model_family_siblings() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, MODEL_FAMILIES, resolve_host_model
+    except ImportError:
+        return False
+    examples = (("anthropic", "claude-sonnet-4", "haiku"), ("openai", "gpt-6-luna", "gpt-6-luna"),
+                ("glm", "glm-5.3-air", "GLM-5.3-Flash"), ("deepseek", "deepseek-v4-pro", "deepseek-flash"),
+                ("qwen", "qwen3-max", "qwen-flash"), ("mistral", "mistral-large-latest", "mistral-small-latest"),
+                ("gemini", "gemini-3.5-pro", "gemini-3.5-flash-lite"), ("kimi", "kimi-k2", None),
+                ("ollama", "custom", None))
+    results = []
+    for provider, model, _ in examples:
+        body = json.dumps({"agents": {"defaults": {"model": {"primary": f"{provider}/{model}"}}}})
+        target = Path("/fixture/openclaw.json")
+        reader = ConfigReader(Path("/project"), Path("/home"), lambda path, body=body: body if path == target else None)
+        results.append(resolve_host_model({"OPENCLAW_CONFIG_PATH": str(target)}, reader,
+                                          ExplicitInput(host="openclaw")))
+    expected = [f"{provider}/{cheap}" if cheap else None for provider, _, cheap in examples]
+    bigger = [family.bigger for family in MODEL_FAMILIES]
+    return (len(MODEL_FAMILIES) == 9 and bigger == ["sonnet", "gpt-5.6-sol", None,
+            "deepseek-v4-pro", None, None, None, None, None]
+            and [item.low_cost_model for item in results] == expected
+            and all(item.default_model == f"{provider}/{model}"
+                    for item, (provider, model, _) in zip(results, examples))
+            and results[1].low_cost_model == results[1].default_model)
+
+
+def check_locality_evidence() -> bool:
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    except ImportError:
+        return False
+    cases = (("custom", "http://127.0.0.1:11434/v1", {}, "remote"), ("ollama", None, {}, "local"),
+             ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "local"}, "local"),
+             ("custom", None, {"VIDEO_ANALYSIS_HOST_AI": "local"}, "local"),
+             ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "nearby"}, "remote"),
+             ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "remote"}, "remote"))
+    for index, (provider, endpoint, env, _) in enumerate(cases):
+        body = {"agents": {"defaults": {"model": {"primary": f"{provider}/model"}}}}
+        if endpoint:
+            body["providers"] = {provider: {"baseUrl": endpoint}}
+        target = Path(f"/fixture/{index}.json")
+        source = json.dumps(body)
+        config = ConfigReader(Path("/project"), Path("/home"),
+                              lambda path, target=target, source=source: source if path == target else None)
+        cases_result = resolve_host_model({**env, "OPENCLAW_CONFIG_PATH": str(target)}, config,
+                                          ExplicitInput(host="openclaw"))
+        if cases_result.locality != cases[index][3]:
+            return False
+    return True
+
+
 def check_real_ocr_smoke() -> tuple[bool, str]:
     try:
         from ocr import ocr_key_frames
@@ -1692,6 +1856,18 @@ def main() -> int:
         "bundle manifest resumes and conflicts safely", lambda: check_bundle_manifest_resume_conflict(video))
     try:
         checks["ffmpeg resolution precedence"] = run_check("ffmpeg resolution precedence", check_tool_resolution)
+        checks["host resolver detects explicit and marked hosts with provenance"] = run_check(
+            "host resolver detects explicit and marked hosts with provenance", check_host_detection_and_provenance)
+        checks["Claude model resolution honors env and settings precedence"] = run_check(
+            "Claude model resolution honors env and settings precedence", check_claude_model_resolution_precedence)
+        checks["Codex model resolution honors CODEX_HOME profile and provider"] = run_check(
+            "Codex model resolution honors CODEX_HOME profile and provider", check_codex_model_resolution_precedence)
+        checks["OpenClaw model resolution tolerates JSON5 and fails closed"] = run_check(
+            "OpenClaw model resolution tolerates JSON5 and fails closed", check_openclaw_json5_resolution)
+        checks["family table selects cheap and bigger siblings"] = run_check(
+            "family table selects cheap and bigger siblings", check_model_family_siblings)
+        checks["locality requires provider evidence or explicit declaration"] = run_check(
+            "locality requires provider evidence or explicit declaration", check_locality_evidence)
         checks["yt-dlp resolved as module when CLI absent"] = run_check("yt-dlp resolved as module when CLI absent", check_ytdlp_module_resolution)
         checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
         checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
