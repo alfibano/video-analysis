@@ -103,7 +103,7 @@ not required because ZIP metadata and relationship ordering vary.
 | Comments | bounded top-level collection, identity removal, opt-out, unavailable state, and independent resume |
 | Preparation and consent | `sheet preparation uses host default model provenance`; `sheet preparation consent matrix enforces write boundaries`; `sheet brief embeds facts and the complete editorial contract`; `sheet preparation resumes and conflicts safely` |
 | Rendering and templates | `default DOCX renders facts accounting context blocks callouts and references`; facts formatting, omitted empty/duplicate facts, one-row description links, localized cost labels, schema-v1 refusal, hyperlinks, tables, borders, shading, template preservation |
-| Resume safety | `sheet render rerun preserves user-edited DOCX`; `changed sheet refuses and leaves DOCX untouched`; `untracked DOCX is refused`; `sheet render requires successful preparation`; `sheet render rejects changed bundle digest` |
+| Resume safety | `sheet render rerun preserves user-edited DOCX`; `changed sheet rerenders owned DOCX atomically and preserves edited DOCX` (recorded output SHA-256, same-name replacement, temp cleanup, and replacement failure); `untracked DOCX is refused`; `sheet render requires successful preparation`; `sheet render rejects changed bundle digest` |
 | Setup | `setup maps docx import to python-docx` |
 | Documentation | `v0.6.0 documentation release and measured-count contract` |
 

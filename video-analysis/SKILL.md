@@ -168,8 +168,9 @@ are stored without commenter identity, and are summarized without names in the s
 
 Preparation/render exits: 2 means invalid or missing input; 3 means invalid sheet or a state/output
 conflict; 4 means preparation consent is required (prepare) or successful preparation is missing
-(render). For exit 3, explain the conflict; if a DOCX already exists, ask the user to rename or move
-it before rerendering. A `.docx` or `.dotx` template is supported. Reruns preserve an existing DOCX.
+(render). For exit 3, explain the conflict; if an edited or untracked DOCX already exists, ask the
+user to rename or move it before rerendering. A `.docx` or `.dotx` template is supported. Reruns
+replace only their own unmodified DOCX; they never overwrite an edited DOCX.
 
 `analyze_video.py` stops at `bundle.json`; preparation, the host writing turn, and DOCX rendering
 are separate commands.

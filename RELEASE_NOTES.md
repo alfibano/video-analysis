@@ -7,6 +7,9 @@
   Their correction, complement, and question icons are antialiased PNGs generated in memory, and
   source links remain clickable inside the text boxes. Spacing separates callouts from tables and
   neighboring content.
+- Rendering records the DOCX SHA-256 and replaces that file in place when inputs change only if its
+  bytes still match the recorded output. Edited or untracked DOCX files remain protected and must be
+  renamed or moved before rendering again; replacement uses a same-folder temporary file.
 
 ### Fixed
 - Fifteen sheet self-test checks read `VIDEO_ANALYSIS_TEMP_DIR` directly and failed with `KeyError`

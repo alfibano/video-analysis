@@ -6,7 +6,9 @@ import hashlib
 import io
 import json
 import math
+import os
 import sys
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -493,7 +495,24 @@ def _resume_decision(output_path: Path, output_name: str, manifest: Mapping[str,
             and stage.get("output") == output_name and old_params == render_params):
         print("sheet render resumed")
         return 0
-    raise _RenderError(3, "render conflict: rename or move the existing DOCX before rerendering")
+    recorded_sha = stage.get("output_sha256") if isinstance(stage, dict) else None
+    if (isinstance(stage, dict) and stage.get("status") == "ok"
+            and stage.get("output") == output_name and isinstance(recorded_sha, str)
+            and _digest(output_path) == recorded_sha):
+        return None
+    raise _RenderError(3, "existing DOCX was edited or is untracked; rename or move it before rendering again")
+
+
+def _save_document_atomic(document: Any, output_path: Path) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        document.save(temporary_path)
+        os.replace(temporary_path, output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def run_render(video: Path, template: Path | None = None) -> int:
@@ -515,17 +534,22 @@ def run_render(video: Path, template: Path | None = None) -> int:
         resumed = _resume_decision(output_path, output_name, manifest, params)
         if resumed is not None:
             return resumed
+        rerendering = output_path.exists()
         try:
             document = render_document(sheet, analysis_dir=analysis, facts=facts, accounting=accounting, template=template)
         except Exception as error:
             if error.__class__.__module__.startswith("docx.image"):
                 raise _RenderError(3, f"invalid frame image: {error}") from error
             raise
-        document.save(output_path)
+        _save_document_atomic(document, output_path)
         manifest["params"]["sheet_render"] = params
-        manifest["stages"]["sheet_render"] = {"status": "ok", "output": output_name}
+        manifest["stages"]["sheet_render"] = {
+            "status": "ok", "output": output_name, "output_sha256": _digest(output_path)}
         _write_manifest(manifest_path, manifest)
-        print(f"sheet rendered: {output_path}")
+        if rerendering:
+            print("sheet re-rendered (previous version was unmodified)")
+        else:
+            print(f"sheet rendered: {output_path}")
         return 0
     except _RenderError as error:
         print(str(error), file=sys.stderr)
@@ -548,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=("Validate host-authored sheet.json and render an editable Word study sheet.\n"
-                     "A successful preparation stage is required; existing DOCX files are preserved."),
+                     "A successful preparation stage is required; edited DOCX files are protected."),
         epilog="Example: python render_sheet.py video.mp4 --template lesson.docx\n"
                "Exit codes: 0 rendered or resumed; 1 processing failure; 2 invalid input;\n"
                "3 invalid sheet or render conflict; 4 successful preparation required.")

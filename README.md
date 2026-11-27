@@ -258,9 +258,10 @@ text; keep callout text within the block-text budget.
 The renderer accepts `.docx` and `.dotx` templates. YouTube and Vimeo links seek to chapter or figure
 timestamps; unsupported sources retain visible timestamps without links. Exit 2 means invalid or
 missing input, exit 3 means invalid sheet or a state/output conflict, and exit 4 means preparation
-consent is required or render preparation is missing. Existing DOCX files are never overwritten;
-rename or move one before rerendering after a conflict. Preparation, host writing, and rendering are
-separate from `analyze_video.py`, which stops at `bundle.json`.
+consent is required or render preparation is missing. Reruns replace only the renderer's own
+unmodified output; an edited DOCX is never overwritten and must be renamed or moved before rendering
+again. Preparation, host writing, and rendering are separate from `analyze_video.py`, which stops at
+`bundle.json`.
 The sheet copies `source.url` exactly from `bundle.json`; the renderer links only safe HTTP(S) URLs.
 
 ## Status

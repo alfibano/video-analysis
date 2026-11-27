@@ -1312,16 +1312,47 @@ def check_render_resume_preserves_docx() -> bool:
         return run_render(video) == 0 and output.read_bytes() == before
 
 
-def check_changed_sheet_refuses_docx() -> bool:
+def check_changed_sheet_rerenders_owned_docx() -> bool:
     from render_sheet import run_render
+    from unittest.mock import patch
     with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
         if run_render(video) != 0:
             return False
-        output = analysis / "sample.docx"; before = output.read_bytes()
+        output = analysis / "sample.docx"
         path = analysis / "sheet.json"; value = json.loads(path.read_text()); value["title"] = "Changed"
         path.write_text(json.dumps(value), encoding="utf-8")
-        return run_render(video) == 3 and output.read_bytes() == before
+        rerender_output = io.StringIO()
+        with contextlib.redirect_stdout(rerender_output):
+            rerender_status = run_render(video)
+        if (rerender_status != 0 or not output.is_file()
+                or "sheet re-rendered (previous version was unmodified)" not in rerender_output.getvalue()):
+            return False
+        manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        stage = manifest["stages"]["sheet_render"]
+        rerendered = output.read_bytes()
+        if stage.get("output_sha256") != hashlib.sha256(rerendered).hexdigest():
+            return False
+        output.write_bytes(output.read_bytes() + b"user edit")
+        value["title"] = "Changed again"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        before = output.read_bytes()
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = run_render(video)
+        if (status != 3 or output.read_bytes() != before
+                or "DOCX was edited" not in error.getvalue()
+                or "rename or move" not in error.getvalue()):
+            return False
+        output.write_bytes(rerendered)
+        value["title"] = "Changed once more"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        error = io.StringIO()
+        with patch("render_sheet.os.replace", side_effect=OSError("replace failed")):
+            with contextlib.redirect_stderr(error):
+                if run_render(video) != 1 or output.read_bytes() != rerendered:
+                    return False
+        return not list(analysis.glob("*.tmp"))
 
 
 def check_untracked_docx_refused() -> bool:
@@ -1329,7 +1360,11 @@ def check_untracked_docx_refused() -> bool:
     with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp)); output = analysis / "sample.docx"
         output.write_bytes(b"user data")
-        return run_render(video) == 3 and output.read_bytes() == b"user data"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = run_render(video)
+        return (status == 3 and output.read_bytes() == b"user data"
+                and "rename or move" in error.getvalue())
 
 
 def check_render_requires_preparation() -> bool:
@@ -3233,8 +3268,9 @@ def main() -> int:
             "missing template styles fall back to Normal", check_missing_styles_fallback)
         checks["sheet render rerun preserves user-edited DOCX"] = run_check(
             "sheet render rerun preserves user-edited DOCX", check_render_resume_preserves_docx)
-        checks["changed sheet refuses and leaves DOCX untouched"] = run_check(
-            "changed sheet refuses and leaves DOCX untouched", check_changed_sheet_refuses_docx)
+        checks["changed sheet rerenders owned DOCX atomically and preserves edited DOCX"] = run_check(
+            "changed sheet rerenders owned DOCX atomically and preserves edited DOCX",
+            check_changed_sheet_rerenders_owned_docx)
         checks["untracked DOCX is refused"] = run_check(
             "untracked DOCX is refused", check_untracked_docx_refused)
         checks["sheet render requires successful preparation"] = run_check(
