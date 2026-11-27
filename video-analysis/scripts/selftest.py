@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
+DEFAULT_CHECKS=132
+FULL_CHECKS=134
 CHILD_OUTPUT: list[str] = []
 LAST_EXTRACT_OUTPUT = ""
 CHECK_OUTPUTS: dict[str, str] = {}
@@ -555,7 +557,7 @@ def _sheet_fixture(root: Path) -> tuple[Path, Path, dict, dict]:
     (analysis / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
     digest = hashlib.sha256((analysis / "bundle.json").read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
-    labels = {key: key.replace("_", " ").title() for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
+    labels = {key: key.replace("_", " ").title() for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "prices_as_of", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
     labels["facts"] = {key: key.replace("_", " ").title() for key in __import__("sheet_schema").FACT_KEYS}
     sheet = {"schema_version": 2, "source": {"bundle_sha256": digest, "title": "Sample",
              "url": "https://youtu.be/abc"}, "language": "fr", "title": "Lesson",
@@ -609,7 +611,7 @@ def check_sheet_schema_valid() -> bool:
             expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer,
             expected_source_url="https://youtu.be/abc", expected_duration_s=5)
         return (accepted == sheet and set(accepted["labels"]) >= {
-            "source", "introduction", "summary", "glossary", "figure", "facts"}
+            "source", "introduction", "summary", "glossary", "figure", "facts", "prices_as_of"}
             and format_hhmmss(360000.9) == "100:00:00")
 
 
@@ -871,6 +873,9 @@ def check_sheet_prepare_brief_contract() -> bool:
             and "never betray the author's message" in brief and "Never debunk religion" in brief
             and "official institutions" in brief and "comments.json only when it exists" in brief
             and '"title"' in brief and "Script-owned facts" in brief
+            and "shown by the renderer for the writer's information" in brief
+            and "must not be copied into `sheet.json`" in brief
+            and '"file_size_mb": 0.0' in brief
             and manifest["stages"]["sheet_prepare"]["consent"] == {
                 "required": False, "granted": True, "method": "not-required"})
 
@@ -904,7 +909,7 @@ def _render_fixture(root: Path, *, prepared: bool = True) -> tuple[Path, Path, d
                                        "speech": {"language": "fr"}}), encoding="utf-8")
     digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
-    labels = {key: key for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
+    labels = {key: key for key in ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "prices_as_of", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")}
     labels.update({"source": "Origine", "introduction": "Présentation", "summary": "Résumé", "glossary": "Lexique", "figure": "Image à"})
     labels["facts"] = {key: key for key in __import__("sheet_schema").FACT_KEYS}
     sheet = {"schema_version": 2, "source": {"bundle_sha256": digest, "title": "Sample",
@@ -956,7 +961,15 @@ def check_default_docx_render() -> bool:
     from docx.oxml.ns import qn
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
-        doc = render_document(sheet, analysis_dir=analysis)
+        sheet["labels"]["prices_as_of"] = "prix en date du"
+        sheet["labels"]["facts"] = {key: key.replace("_", " ").title()
+                                    for key in __import__("sheet_schema").FACT_KEYS}
+        doc = render_document(sheet, analysis_dir=analysis, facts={
+            "title": "Sample", "duration_s": 10459, "file_size_mb": 2.26,
+            "view_count": 17379, "like_count": 2345, "manual_subtitle_languages": [],
+            "description_links": ["https://example.com/one", "https://example.com/two"],
+        }, accounting={"tokens": {"total": 17379, "measured": 12345, "estimated": 5034},
+                      "usd": {"total": 1.236}})
         paragraphs = [(p.style.name, p.text) for p in doc.paragraphs]
         text = [value for _, value in paragraphs]
         hyperlinks = doc.part.element.xpath(".//w:hyperlink")
@@ -978,11 +991,31 @@ def check_default_docx_render() -> bool:
         from render_sheet import _hyperlink
         _hyperlink(localized.paragraphs[1], "localized", "https://example.com")
         style_values = [node.get(qn("w:val")) for node in localized_link.xpath(".//w:rStyle")]
+        english_sheet = {**sheet, "language": "en"}
+        english_doc = render_document(english_sheet, analysis_dir=analysis,
+            facts={"duration_s": 3549, "view_count": 17379},
+            accounting={"tokens": {"total": 17379, "measured": 12345, "estimated": 5034},
+                        "usd": {"total": "n/a"}})
+        english_text = " ".join(cell.text for row in english_doc.tables[0].rows for cell in row.cells)
         table_text = " ".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
+        facts_cells = [cell.text for row in doc.tables[0].rows for cell in row.cells]
+        description_rows = [row for row in doc.tables[0].rows if row.cells[0].text == "Description Links"]
+        external_targets = [relation.target_ref for relation in doc.part.rels.values() if relation.is_external]
         return (visible_hyperlinks and not has_hyperlink_style and style_values == ["Lienhypertexte"]
             and text[0] == "Lesson" and "Sample" in table_text and "Présentation" in text
             and "Résumé" in text and "Lexique" in text and "Chapter text" in table_text and "Image à" in table_text
             and len(doc.inline_shapes) == 1 and doc.core_properties.title == "Lesson"
+            and "2:54:19" in facts_cells and "2.3 MB" in facts_cells
+            and "17\u202f379" in facts_cells and "2\u202f345" in facts_cells
+            and "1.24 $" in " ".join(facts_cells) and "12\u202f345" in " ".join(facts_cells)
+            and "prix en date du 2026-11-03" in " ".join(facts_cells)
+            and sum(row.cells[0].text == "Title" for row in doc.tables[0].rows) == 0
+            and not any(row.cells[0].text == "Manual Subtitle Languages" for row in doc.tables[0].rows)
+            and len(description_rows) == 1
+            and description_rows[0].cells[1].text == "https://example.com/one\nhttps://example.com/two"
+            and external_targets.count("https://example.com/one") == 1
+            and external_targets.count("https://example.com/two") == 1
+            and "59:09" in english_text and "17,379" in english_text and "n/a" in english_text
             and doc.core_properties.author == "video-analysis"
             and doc.core_properties.created == FIXED_CORE_TIME
             and doc.core_properties.modified == FIXED_CORE_TIME)
@@ -2578,24 +2611,34 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_v050_documentation_and_release_contract() -> bool:
+def check_v060_documentation_and_release_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
-    docs = readme + skill
-    commands = all(name in docs for name in ("prepare_sheet.py", "render_sheet.py"))
-    outputs = all(name in docs for name in ("sheet.brief.md", "sheet.json", "<video stem>.docx"))
-    sheet_flow = all(term in skill for term in ("current session default model", "never delegated",
-        "most telling frame", "ON SCREEN", "SAID", "INFERENCE", "exit 3", "exit 4"))
-    labels_language = all(term in docs for term in ("labels", "sheet language", "speech language"))
-    release_contract = "v0.5.0" in release and "2026-11-27" in release
-    platform_status = "steps 1–4 implemented" in platform or "steps 1-4 implemented" in platform
-    pipeline_boundary = "stops at `bundle.json`" in docs or "stops at bundle.json" in docs
-    count_contract = all(term in readme + release + (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
-                         for term in ("DEFAULT_CHECKS=114", "FULL_CHECKS=116", "116 passed"))
-    return all((commands, outputs, sheet_flow, labels_language, release_contract,
-                platform_status, pipeline_boundary, count_contract))
+    test_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
+    docs = readme + skill + release + platform + test_docs
+    release_contract = "v0.6.0" in release and "2026-11-27" in release
+    comments = all(term in docs for term in ("--comments 0", "commenter identity", "without names"))
+    language = all(term in docs for term in ("user's requested", "--language", "sheet language"))
+    migration = "regenerate sheet.json with the v0.6.0 brief" in docs
+    facts_cost = all(term in docs.lower() for term in (
+        "deterministic", "measured correction", "estimated writing", "anthropic", "2026-11-03", "n/a"))
+    editorial = all(term in docs.lower() for term in (
+        "incontestable sources", "never debunk", "spirituality", "esotericism", "flagrant imprecision"))
+    structure = all(term in docs.lower() for term in ("blocks", "callouts", "references", "several frames"))
+    count_surfaces = [readme, release, test_docs, Path(__file__).read_text(encoding="utf-8")]
+    count_pins = []
+    for key in ("DEFAULT_CHECKS", "FULL_CHECKS"):
+        values = []
+        for text in count_surfaces:
+            match = re.search(rf"{key}=(\d+)", text)
+            if not match:
+                return False
+            values.append(match.group(1))
+        count_pins.append(len(set(values)) == 1)
+    return all((release_contract, comments, language, migration, facts_cost,
+                editorial, structure, *count_pins))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -3173,9 +3216,9 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["v0.5.0 documentation release and measured-count contract"] = run_check(
-            "v0.5.0 documentation release and measured-count contract",
-            check_v050_documentation_and_release_contract)
+        checks["v0.6.0 documentation release and measured-count contract"] = run_check(
+            "v0.6.0 documentation release and measured-count contract",
+            check_v060_documentation_and_release_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(

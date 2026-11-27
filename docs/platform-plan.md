@@ -1,6 +1,6 @@
 # Platform evolution — design and delivery plan
 
-Status: **steps 1–4 implemented in v0.5.0; scene-aware/adaptive sampling, relative bundle paths, host-default sheet writing, and editable DOCX rendering delivered** (2026-11-27).
+Status: **steps 1–4 implemented in v0.6.0; scene-aware/adaptive sampling, bounded private comments, deterministic facts/accounting, strict schema-v2 sheets, and editable DOCX rendering delivered** (2026-11-27).
 
 ## Step 2 — aligned bundle
 
@@ -17,20 +17,22 @@ warms the model once, while `--skip-ocr` records an intentional omission.
 
 ## Vision
 Turn the `video-analysis` skill into a learning platform: from a local or online video, produce an
-editable Word `.docx` study sheet with introduction, summary, chapter-by-chapter text, the most
-telling screenshot per chapter and a link to its time code. PDF/PPTX and other formats remain later
-work. Scripts handle mechanical tasks; the selected host session default model writes the sheet from
-a prepared bundle.
+editable Word `.docx` study sheet with introduction, summary, chapter-by-chapter text, multiple
+distinct screenshots when useful, and links to their time codes. PDF/PPTX and other formats remain
+later work. Scripts handle mechanical facts and accounting; the selected host session default model
+writes the sheet from a prepared bundle.
 
 | Stage | Who |
 |---|---|
 | Download, metadata, chapters, published subtitles, SponsorBlock skip-list | script (yt-dlp) |
+| Bounded top-level comments, identity removed before persistence | script (yt-dlp privacy projection) |
 | Frames with exact container timestamps, denser when the screen moves | script (ffmpeg) |
 | On-screen text (OCR) | script |
 | Transcript pass 1 | faster-whisper, local |
 | Transcript pass 2 (misheard words, glossary from metadata/OCR) | selected host's resolved session default or its known same-family low-cost sibling |
-| Pick the most telling frame per chapter | host agent after viewing the chapter frames |
-| Sheet outline, themes, key moments, and text in `sheet.json` | selected host session default model, text bundle + selected frames |
+| Deterministic video facts and measured/estimated cost basis | script; renderer formats facts and localized labels |
+| Pick distinct useful frames per chapter and explain chapter boundaries | host agent after viewing chapter frames |
+| Sheet outline, blocks, callouts, references, context, and text in `sheet.json` | selected host session default model, bundle + frames + optional comments |
 | Validate and render editable DOCX with time-code links | script, built-in formatting or `.docx` / `.dotx` template |
 | Archive working folder as zip; recycle bin only on explicit option | script |
 
@@ -39,9 +41,11 @@ explicit option; mobile app postponed (later a thin client); cheap online model 
 models dropped after the 2026-11-26 benchmark); installable in minutes on Windows, macOS and Linux,
 reusing tools already present.
 
-Step order: 1 fetch + metadata + exact timestamps → 2 per-chapter aligned bundle (speech + frames +
-OCR) → 3 transcript correction (cheap online model) → 4 `prepare_sheet.py` → host writes
-`sheet.json` → `render_sheet.py` produces editable DOCX. Later: PDF/PPTX, provider adapter/UI,
+Step order: 1 fetch + metadata + exact timestamps + optional bounded comments → 2 per-chapter aligned
+bundle (speech + frames + OCR) → 3 transcript correction → 4 `prepare_sheet.py` → host writes
+strict schema-v2 `sheet.json` → `render_sheet.py` produces editable DOCX. The renderer owns source
+facts and calculates correction/writing costs; Anthropic prices are dated 2026-11-03 and unsupported
+models show USD `n/a`. Later: PDF/PPTX, provider adapter/UI,
 knowledge base, review, and mobile.
 
 ## Step 3 — correction model benchmark (2026-11-26)

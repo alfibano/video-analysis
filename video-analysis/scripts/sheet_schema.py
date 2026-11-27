@@ -18,7 +18,7 @@ def _object(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
 _TEXT = {"type": "string", "minLength": 1}
 _NUMBER = {"type": "number"}
 FACT_KEYS = ("title", "channel_name", "channel_url", "youtube_publication_date", "duration_s", "file_size_mb", "resolution", "view_count", "like_count", "comment_count", "audio_language", "manual_subtitle_languages", "automatic_caption_language_count", "description_links")
-LABEL_KEYS = ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")
+LABEL_KEYS = ("source", "introduction", "summary", "chapters_rationale", "glossary", "references", "figure", "cost", "tokens", "estimated", "measured", "prices_as_of", "series", "comments", "author_email", "recording_date", "correction", "complement", "question")
 _LABELS = {key: dict(_TEXT) for key in LABEL_KEYS}
 _LABELS["facts"] = _object({key: dict(_TEXT) for key in FACT_KEYS}, list(FACT_KEYS))
 _NULL_TEXT = {"oneOf": [dict(_TEXT), {"type": "null"}]}

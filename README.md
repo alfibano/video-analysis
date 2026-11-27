@@ -105,8 +105,9 @@ python video-analysis/scripts/selftest.py           # offline checks on a synthe
 
 `selftest.py` checks in one command, without a real video, that the skill works on your machine:
 it builds a 20 s synthetic video, runs the extraction on it and reports `PASS`/`FAIL` on named checks,
-including cases where the tool must **refuse**. Run it after installing and before every
-release; `--full` also tests transcription. The default run stays offline; `--network URL` opts into
+including cases where the tool must **refuse**. Run it after installing and before every release;
+`--full` also tests transcription and requires a cached Whisper model. The default run stays offline;
+`--network URL` opts into
 a real fetch and extraction (`python video-analysis/scripts/selftest.py --network "<url>"`). Details:
 [docs/selftest.md](docs/selftest.md).
 
@@ -128,7 +129,7 @@ In Claude Code, just ask: "analyse this video: <url or path>". The agent runs on
 you can also run yourself:
 
 ```bash
-python video-analysis/scripts/analyze_video.py "https://www.youtube.com/watch?v=<id>" --dest "<folder>" --language en
+python video-analysis/scripts/analyze_video.py "https://www.youtube.com/watch?v=<id>" --dest "<folder>" --language en --comments 100
 python video-analysis/scripts/analyze_video.py "<folder>/talk.mp4" --language fr
 ```
 
@@ -224,13 +225,28 @@ python video-analysis/scripts/render_sheet.py "<video>"
 python video-analysis/scripts/render_sheet.py "<video>" --template "<template.docx>"
 ```
 
-The agent writing `sheet.json` uses the current session's default model and is never delegated. It
-views the selected chapter frames, chooses the most telling frame per chapter, and writes
-evidence-faithful `ON SCREEN`, `SAID`, and `INFERENCE` content. Schema v1 includes required `labels`
-for source, introduction, summary, glossary, and figure in the sheet language. With `--language auto`,
-the speech language in `bundle.json` is used when present; otherwise the brief instructs the writer
-to use the speech language. For local media, preparation exit 4 means ask for consent and rerun with
-`--allow-remote-ai` only after approval.
+The agent writing `sheet.json` uses the current session's default model and is never delegated. Pass
+the user's requested sheet language explicitly with `prepare_sheet.py --language <language>`; use
+`auto` only when requested. Schema v2 has strict nested fields and requires visible labels in the sheet
+language. For local media, preparation exit 4 means ask for consent and rerun with `--allow-remote-ai`
+only after approval. Schema v1 is refused with `regenerate sheet.json with the v0.6.0 brief`.
+
+The renderer displays deterministic script-owned facts for the writer's information; they must not be
+copied into `sheet.json`. It formats durations and counts for people, rounds file size to one decimal,
+omits empty values and duplicate titles, and renders safe description links on separate lines in one
+row. The cost line groups tokens, rounds USD to two decimals, and separates measured correction usage
+from estimated writing tokens using dated Anthropic list prices; unknown prices or incomplete measured
+costs render USD as `n/a`.
+
+URL fetching collects at most 100 top-level comments by default. Set `--comments 0` to disable it or
+`--comments N` for a limit from 1 to 100; this option is URL-only. Persisted comments omit commenter
+identity and should be summarized without names or identifiers. The writer may use web search to
+fact-check callouts and establish a series. Use incontestable sources (official institutions,
+statistical offices, reference encyclopedias, or peer-reviewed work). Corrections are for lies or
+flagrant imprecision; questions are for unavoidable essential information; never debunk religion,
+spirituality, or esotericism. Include author email only when published by the author in a description
+or slide. Explain chapter-boundary choices and place multiple distinct frames beside their related
+text; keep callout text within the block-text budget.
 
 | Output | Purpose |
 |---|---|
@@ -249,8 +265,9 @@ The sheet copies `source.url` exactly from `bundle.json`; the renderer links onl
 
 ## Status
 
-v0.5.0 — measured checks: `DEFAULT_CHECKS=114` (114 passed, 0 failed); `FULL_CHECKS=116`
-(116 passed, 0 failed). See
+v0.6.0 — measured default: `DEFAULT_CHECKS=132` (132 passed, 0 failed). The `--full` run measured
+`FULL_CHECKS=134`; in this sandbox, four checks depending on Whisper failed because the model snapshot
+was unavailable. See
 [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License

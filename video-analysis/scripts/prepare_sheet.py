@@ -82,7 +82,10 @@ def _resolved_language(requested: str, bundle: dict) -> tuple[str, str]:
 def _brief(analysis: Path, digest: str, params: dict, facts: dict, comments: list | None) -> str:
     from sheet_schema import SHEET_JSON_SCHEMA_V2
     schema = json.dumps(SHEET_JSON_SCHEMA_V2, ensure_ascii=False, indent=2)
-    facts_json = json.dumps(facts, ensure_ascii=False, indent=2)
+    brief_facts = dict(facts)
+    if isinstance(brief_facts.get("file_size_mb"), (int, float)):
+        brief_facts["file_size_mb"] = round(brief_facts["file_size_mb"], 1)
+    facts_json = json.dumps(brief_facts, ensure_ascii=False, indent=2)
     language_instruction = (params["language"] if params["language"] != "auto"
                             else "auto; write in the speech language")
     return f"""# Study sheet writer brief
@@ -105,7 +108,7 @@ Corrections are only for lies or flagrant imprecision. Questions are only for es
 
 Use context only with evidence: recording date and author email require non-empty evidence; include email only when published by the author in a description or slide. Include a series only with evidence; host research may use web search, otherwise leave it null. Summarize comments without names or identifiers, and read comments.json only when it exists (fetched top-level count: {len(comments) if comments is not None else 0}). Every visible label must be written in the sheet language. Distinguish on-screen evidence, speech, and inference. Use corrected speech only when its provenance is present in the bundle. Do not call a provider and do not delegate to a low-cost model.
 
-Script-owned facts (include these verbatim; do not invent or edit them):
+Script-owned facts are shown by the renderer for the writer's information. They must not be copied into `sheet.json` or added as a facts field there.
 ```json
 {facts_json}
 ```

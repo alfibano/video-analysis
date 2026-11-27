@@ -1,5 +1,32 @@
 # Release notes — video-analysis
 
+## v0.6.0 — 2026-11-27 — bounded comments and localized study sheets
+
+### Added
+- URL fetches collect up to 100 top-level comments by default; `--comments 0` disables collection.
+  Persisted comments contain no commenter identity. Sheet schema v2 adds deterministic facts, context,
+  multiple chapter blocks/frames, callouts, references, and localized labels.
+- DOCX facts are formatted for readers: durations, grouped counts, one-decimal MB values, and safe
+  description links in a single row. The cost line separates measured correction tokens from estimated
+  writing tokens, uses two-decimal USD and Anthropic list prices dated 2026-11-03, and shows `n/a` when
+  USD cannot be supported.
+
+### Changed
+- Writers must pass the user's requested language through `prepare_sheet.py --language`. The brief
+  makes renderer-owned facts informational and says not to copy them into `sheet.json`. Schema-v1
+  sheets now require regeneration with the v0.6.0 brief.
+- Editorial rules restrict corrections to lies or flagrant imprecision, reserve questions for essential
+  unavoidable information, require incontestable sources, and prohibit debunking religion, spirituality,
+  or esotericism. Comments are summarized without names; author email is allowed only when published
+  by the author. Several distinct frames may appear in each chapter beside their related text.
+- Live DOCX review found and fixed two integration issues: yt-dlp comment arguments are strings, and
+  the writer brief is persisted as exact UTF-8 bytes.
+
+### Measured
+- Default self-test: `DEFAULT_CHECKS=132` (132 passed, 0 failed).
+- `--full`: `FULL_CHECKS=134`; four Whisper-dependent checks failed in this sandbox because its model
+  snapshot was unavailable. The remaining checks passed.
+
 ## v0.5.0 — 2026-11-27 — editable DOCX study sheets
 
 ### Added

@@ -87,7 +87,7 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 | *(with `--full`)* wav is 16 kHz mono PCM16 | the audio is in the format Whisper expects |
 | *(with `--full`)* transcript files written | transcription runs (no `metadata_errors` crash) |
 
-## v0.5.0 sheet checks
+## v0.6.0 sheet checks
 
 Study-sheet fixtures are generated under `VIDEO_ANALYSIS_TEMP_DIR`: fake video and bundle/manifest,
 a tiny PNG, valid `sheet.json`, and temporary `.docx`/`.dotx` templates. Tests use a fake
@@ -98,18 +98,21 @@ not required because ZIP metadata and relationship ordering vary.
 
 | Group | Named checks |
 |---|---|
-| Schema | `sheet schema accepts valid v1`; `sheet schema rejects missing and unknown fields with named errors`; `sheet schema rejects wrong types and empty required text`; `sheet schema rejects invalid chapter intervals`; `sheet schema rejects unordered and overlapping chapters`; `sheet schema rejects frame time outside its chapter`; `sheet schema blocks absolute drive traversal and non-normal frame paths`; `sheet schema rejects missing frame files`; `sheet schema rejects stale bundle digest`; `sheet schema rejects writer identity mismatch`; `seek links cover YouTube Vimeo and unsupported sources` |
-| Preparation and consent | `sheet preparation uses host default model provenance`; `sheet preparation consent matrix enforces write boundaries`; `sheet brief contains exact schema and writer values`; `sheet preparation resumes and conflicts safely` |
-| Rendering and templates | `default DOCX render has ordered content images and properties`; `sheet source URL must match bundle and be a safe web link`; `DOCX template reuses styles headers footers and section properties`; `DOTX template renders as document content type`; `missing template styles fall back to Normal` |
+| Schema | `sheet schema accepts valid v2`; strict nested v2, duration summary, frames, references, context evidence, safe URLs, and callout budget checks |
+| Facts and accounting | deterministic sourced facts; measured correction plus estimated writing tokens; incomplete or unknown USD is `n/a` |
+| Comments | bounded top-level collection, identity removal, opt-out, unavailable state, and independent resume |
+| Preparation and consent | `sheet preparation uses host default model provenance`; `sheet preparation consent matrix enforces write boundaries`; `sheet brief embeds facts and the complete editorial contract`; `sheet preparation resumes and conflicts safely` |
+| Rendering and templates | `default DOCX renders facts accounting context blocks callouts and references`; facts formatting, omitted empty/duplicate facts, one-row description links, localized cost labels, schema-v1 refusal, hyperlinks, tables, borders, shading, template preservation |
 | Resume safety | `sheet render rerun preserves user-edited DOCX`; `changed sheet refuses and leaves DOCX untouched`; `untracked DOCX is refused`; `sheet render requires successful preparation`; `sheet render rejects changed bundle digest` |
 | Setup | `setup maps docx import to python-docx` |
-| Documentation | `v0.5.0 documentation release and measured-count contract` |
+| Documentation | `v0.6.0 documentation release and measured-count contract` |
 
 The check named `default DOCX render has ordered content images and properties` also verifies that
 built-in-template hyperlink runs have visible formatting when no `Hyperlink` character style exists.
 Source links must match `bundle.json` and use a safe HTTP(S) URL; unsafe values remain plain text.
-Measured release totals: `DEFAULT_CHECKS=114` (114 passed, 0 failed); `FULL_CHECKS=116`
-(116 passed, 0 failed).
+Measured release totals: `DEFAULT_CHECKS=132` (132 passed, 0 failed); `FULL_CHECKS=134` result rows.
+The sandbox full run had four Whisper-dependent failures because the requested model snapshot was not
+cached; all other checks passed. `--full` needs the Whisper model available locally.
 
 The two refusal checks matter: a guard that has never been seen refusing proves nothing.
 
@@ -132,7 +135,7 @@ self-test without installation or readiness probes.
 
 ```bash
 python video-analysis/scripts/selftest.py            # fast, no transcription (no model needed)
-python video-analysis/scripts/selftest.py --full     # uses cached Whisper model; skips it if absent
+python video-analysis/scripts/selftest.py --full     # requires a cached Whisper model
 python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where test files go
 python video-analysis/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
 ```

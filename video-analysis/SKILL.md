@@ -141,15 +141,30 @@ python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>"
 python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>" --template "<template.docx>"
 ```
 
-The preparation command prints the selected host session default model. If it exits 4, ask for
-consent and rerun with `--allow-remote-ai` only after approval. Read `sheet.brief.md`, `bundle.json`,
-and the selected chapter frame images. The agent in the current session writes `sheet.json` itself
-with the current session default model; sheet writing is never delegated. After viewing the frames, choose the
-most telling frame per chapter. Write readable study prose faithful to the evidence: never present
-an INFERENCE as something SAID or shown ON SCREEN, but do not tag sentences with these words. Schema v1 requires non-empty `labels` for `source`,
-`introduction`, `summary`, `glossary`, and `figure`, written in the sheet language. With
-`--language auto`, use `speech.language` from the bundle when present; otherwise write in the speech
-language. Run `render_sheet.py` and relay the resulting DOCX path.
+Pass the user's requested output language explicitly with `prepare_sheet.py --language <user language>`;
+use `auto` only when the user asks for that behavior. The preparation command prints the selected host
+session default model. If it exits 4, ask for consent and rerun with `--allow-remote-ai` only after
+approval. Read `sheet.brief.md`, `bundle.json`, comments when present, and the selected chapter frame
+images. The current session writes `sheet.json` itself; sheet writing is never delegated.
+
+Use schema v2 labels and content in the selected language. Give every chapter a short rationale for
+its boundaries. Place several frames in a chapter when each adds distinct information, with each frame
+beside its explanatory block. Keep corrections to lies or flagrant imprecision; ask a question only
+when essential information is unavoidable. Complements may clarify without changing the author's
+message. Web search is allowed to fact-check callouts and establish a series, but cite incontestable
+sources such as official institutions, statistical offices, reference encyclopedias, or peer-reviewed
+work. Never debunk religion, spirituality, or esotericism. Keep total callout text within the total
+block-text budget. Summarize comments without names or identifiers; include an author email only when
+the author published it in a description or slide. Never present inference as something said or shown.
+The renderer displays script-owned facts for the writer's information; do not copy them into
+`sheet.json`. Facts include deterministic metadata, safe description links, and a localized cost line
+that distinguishes measured correction usage from estimated writing tokens at dated Anthropic list
+prices; unsupported models show USD `n/a`.
+
+Schema v1 sheets are refused with `regenerate sheet.json with the v0.6.0 brief`. Run
+`render_sheet.py` and relay the resulting DOCX path. `analyze_video.py <URL> --comments N` collects up
+to 100 top-level comments (default 100); `--comments 0` disables collection. Comments are optional,
+are stored without commenter identity, and are summarized without names in the sheet.
 
 Preparation/render exits: 2 means invalid or missing input; 3 means invalid sheet or a state/output
 conflict; 4 means preparation consent is required (prepare) or successful preparation is missing

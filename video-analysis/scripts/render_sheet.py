@@ -63,6 +63,27 @@ def _hyperlink(paragraph, text: str, target: str) -> None:
     paragraph._p.append(hyperlink)
 
 
+def _grouped_count(value: Any, language: str) -> str:
+    grouped = f"{int(value):,}"
+    return grouped.replace(",", "\u202f") if language.casefold().startswith("fr") else grouped
+
+
+def _fact_value(key: str, value: Any, language: str) -> str:
+    if key == "duration_s":
+        hours, remainder = divmod(int(value), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+    if key == "file_size_mb":
+        return f"{value:.1f} MB"
+    if key in {"view_count", "like_count", "comment_count", "automatic_caption_language_count"}:
+        return _grouped_count(value, language)
+    return ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+
+
+def _format_usd(value: Any) -> str:
+    return "n/a" if value == "n/a" else f"{value:.2f} $"
+
+
 def _document_from_template(template: Path | None):
     from docx import Document
     if template is None:
@@ -173,20 +194,34 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapp
     facts_table.columns[0].width, facts_table.columns[1].width =  Inches(1.55), max(Inches(1), available - Inches(1.55))
     rows = [(sheet["labels"]["source"], sheet["source"]["title"])]
     for key, value in facts.items():
+        if value is None or value == "" or value == [] or (key == "title" and value == sheet["source"]["title"]):
+            continue
         label = sheet["labels"]["facts"].get(key, key)
-        if key in {"channel_url"} or key == "description_links":
-            values = value if isinstance(value, list) else [value]
-            for link in values: rows.append((label, link))
-        elif key == "file_size_mb": rows.append((label, f"{value:.2f} MB"))
-        else: rows.append((label, ", ".join(value) if isinstance(value, list) else str(value)))
+        shown_value = value if key in {"channel_url", "description_links"} else _fact_value(
+            key, value, sheet.get("language", "en"))
+        rows.append((label, shown_value))
     tokens, usd = accounting.get("tokens", {}), accounting.get("usd", {})
-    usd_text = "n/a" if usd.get("total") == "n/a" else f"{usd.get('total', 0):.6f} $"
-    rows.append((sheet["labels"]["cost"], f"{tokens.get('total', 0)} {sheet['labels']['tokens']} · {usd_text} ({tokens.get('measured', 0)} {sheet['labels']['measured']} + {tokens.get('estimated', 0)} {sheet['labels']['estimated']}, prices as of 2026-11-03)"))
+    usd_text = _format_usd(usd.get("total", 0))
+    language = sheet.get("language", "en")
+    total_tokens = _grouped_count(tokens.get("total", 0), language)
+    measured_tokens = _grouped_count(tokens.get("measured", 0), language)
+    estimated_tokens = _grouped_count(tokens.get("estimated", 0), language)
+    price_date = sheet["labels"]["prices_as_of"]
+    cost_line = (f"{total_tokens} {sheet['labels']['tokens']} · {usd_text} "
+                 f"({measured_tokens} {sheet['labels']['measured']} + {estimated_tokens} "
+                 f"{sheet['labels']['estimated']}, {price_date} 2026-11-03)")
+    rows.append((sheet["labels"]["cost"], cost_line))
     for label, value in rows:
         cells = facts_table.add_row().cells; cells[0].width, cells[1].width = Inches(1.55), max(Inches(1), available - Inches(1.55))
         cells[0].text = str(label); p = cells[1].paragraphs[0]
         if label == sheet["labels"]["source"] and is_safe_web_url(sheet["source"].get("url")):
             p.add_run(str(value) + " ("); _hyperlink(p, sheet["source"]["url"], sheet["source"]["url"]); p.add_run(")")
+        elif label == sheet["labels"]["facts"].get("description_links") and isinstance(value, list):
+            for index, link in enumerate(value):
+                if index:
+                    p.add_run().add_break()
+                if is_safe_web_url(link): _hyperlink(p, link, link)
+                else: p.add_run(str(link))
         elif isinstance(value, str) and is_safe_web_url(value): _hyperlink(p, value, value)
         else: p.add_run(str(value))
         for cell in cells:
