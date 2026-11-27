@@ -102,9 +102,9 @@ def _claude_low(environ: Mapping[str, str], default: str | None,
     for name in ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"):
         if environ.get(name):
             return environ[name], f"from {name}"
-    if not base_url and (default is None or _family("anthropic", default)):
-        if default and (default.lower() in {"haiku"} or default.lower().startswith("claude-haiku")):
-            return default, "configured model already has the low-cost role"
+    if not base_url:
+        if default:
+            return _family_sibling("anthropic", default, "low_cost")
         return "haiku", "native Claude haiku alias; no custom base URL"
     return _family_sibling("anthropic", default, "low_cost")
 
@@ -311,14 +311,14 @@ def _endpoint_identity(endpoint: str | None, provider: str) -> str:
 def _family(provider: str, model: str | None) -> ModelFamily | None:
     normalized_provider, normalized_model = provider.lower(), (model or "").lower()
     normalized_model = normalized_model.split("/", 1)[-1]
-    local = next((family for family in MODEL_FAMILIES if normalized_provider in family.provider_aliases), None)
-    if local and local in MODEL_FAMILIES[-1:]:
+    local_providers = {"ollama", "lmstudio", "local"}
+    local = next((family for family in MODEL_FAMILIES
+                  if normalized_provider in family.provider_aliases), None)
+    if normalized_provider in local_providers:
         return local
     by_model = next((family for family in MODEL_FAMILIES
                      if any(re.fullmatch(pattern, normalized_model) for pattern in family.model_patterns)), None)
-    if by_model:
-        return by_model
-    return None
+    return by_model
 
 
 def _family_sibling(provider: str, model: str | None, sibling: str) -> tuple[str | None, str]:

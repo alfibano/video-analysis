@@ -44,6 +44,15 @@ class ProviderResult:
     error: bool = False
     usage: TokenUsage = TokenUsage()
     reported_cost_usd: float | None = None
+    failure_category: FailureCategory | None = None
+    reported_provider: str | None = None
+    reported_model: str | None = None
+
+
+class FailureCategory(Enum):
+    TRANSPORT = "transport"
+    MODEL_UNAVAILABLE = "model-unavailable"
+    PROVIDER = "provider"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +146,19 @@ class ChunkRun:
     max_workers: int = 2
     chunk_ordinals: Sequence[int] | None = None
     invocation: ModelInvocation = ModelInvocation.OVERRIDE
+    fallback: ModelFallback | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFallback:
+    host: str
+    model: str | None
+    invocation: ModelInvocation
+
+
+@dataclass(frozen=True, slots=True)
+class EscalationChoice:
+    model: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +455,25 @@ def parse_codex_result(stdout: str) -> ProviderResult:
     return ProviderResult(answer, usage=TokenUsage(input_tokens, cached, output_tokens, reasoning, total))
 
 
+def _classify_failure(error: BaseException | None = None, output: str = "") -> FailureCategory:
+    text = output.lower()
+    error_name = type(error).__name__.lower() if error is not None else ""
+    transport_error = isinstance(error, (TimeoutError, ConnectionError, subprocess.TimeoutExpired))
+    transport_error = transport_error or any(word in error_name for word in ("timeout", "connection"))
+    if transport_error or any(phrase in text for phrase in (
+            "timed out", "timeout", "connection refused", "connection reset", "connection error")):
+        return FailureCategory.TRANSPORT
+    if any(phrase in text for phrase in ("model not found", "model_not_found", "unknown model",
+                                         "model unavailable", "model is unavailable", "model not available",
+                                         "no such model", "does not exist")):
+        return FailureCategory.MODEL_UNAVAILABLE
+    return FailureCategory.PROVIDER
+
+
+def _failure_result(error: BaseException | None = None, output: str = "") -> ProviderResult:
+    return ProviderResult(None, error=True, failure_category=_classify_failure(error, output))
+
+
 class ClaudeCodeClient:
     """Ephemeral Claude Code adapter using the logged-in host account."""
 
@@ -455,10 +496,10 @@ class ClaudeCodeClient:
                                encoding="utf-8", cwd=str(neutral), timeout=900,
                                shell=False, check=False)
             if done.returncode != 0:
-                return ProviderResult(None, error=True)
+                return _failure_result(output=f"{done.stdout}\n{done.stderr}")
             return parse_claude_result(done.stdout)
-        except Exception:
-            return ProviderResult(None, error=True)
+        except Exception as error:
+            return _failure_result(error)
 
 
 class CodexClient:
@@ -483,10 +524,10 @@ class CodexClient:
                                capture_output=True, text=True, encoding="utf-8",
                                cwd=str(neutral), timeout=900, shell=False, check=False)
             if done.returncode != 0:
-                return ProviderResult(None, error=True)
+                return _failure_result(output=f"{done.stdout}\n{done.stderr}")
             return parse_codex_result(done.stdout)
-        except Exception:
-            return ProviderResult(None, error=True)
+        except Exception as error:
+            return _failure_result(error)
 
 
 class OpenClawClient:
@@ -506,10 +547,12 @@ class OpenClawClient:
                                timeout=900, shell=False, check=False)
             payload = json.loads(done.stdout)
             if done.returncode or payload.get("status") not in (None, "ok", "success", "completed"):
-                return ProviderResult(None, error=True)
-            return ProviderResult(payload.get("final"), usage=_openclaw_usage(payload.get("usage")))
-        except Exception:
-            return ProviderResult(None, error=True)
+                return _failure_result(output=f"{done.stdout}\n{done.stderr}")
+            return ProviderResult(payload.get("final"), usage=_openclaw_usage(payload.get("usage")),
+                                  reported_provider=payload.get("provider"),
+                                  reported_model=payload.get("model"))
+        except Exception as error:
+            return _failure_result(error)
 
 
 def _openclaw_usage(value: Any) -> TokenUsage:
@@ -746,7 +789,7 @@ def _consent_decision(state: CorrectionStage, settings: CorrectionSettings
 
 
 def _run_chunk(run: ChunkRun, chunk: tuple[int, list[CorrectionInput]]) -> tuple[
-        int, list[CorrectedSegment], TokenUsage, float | None]:
+        int, list[CorrectedSegment], TokenUsage, float | None, FailureCategory | None]:
     first_id, items = chunk
     try:
         response = run.client.correct(model=run.model, system_prompt=SYSTEM_PROMPT,
@@ -758,8 +801,13 @@ def _run_chunk(run: ChunkRun, chunk: tuple[int, list[CorrectionInput]]) -> tuple
                                      reported_cost_usd=outcome.reported_cost_usd)
     except Exception as error:  # Any provider failure must fall back to the original chunk.
         print(f"correction provider failure: {type(error).__name__}", file=sys.stderr)
-        outcome = ProviderResult(None, error=True)
-    return first_id, correct_chunk(items, outcome, first_id=first_id), outcome.usage, outcome.reported_cost_usd
+        outcome = _failure_result(error)
+    category = outcome.failure_category or (FailureCategory.PROVIDER if outcome.error else None)
+    rows = [CorrectedSegment(row.start, row.end, row.original_text, row.corrected_text, row.status,
+                             outcome.reported_provider, outcome.reported_model)
+            for row in correct_chunk(items, outcome, first_id=first_id)]
+    return (first_id, rows, outcome.usage,
+            outcome.reported_cost_usd, category)
 
 
 def _collect_chunks(run: ChunkRun, chunks: Sequence[tuple[int, list[CorrectionInput]]]
@@ -768,7 +816,7 @@ def _collect_chunks(run: ChunkRun, chunks: Sequence[tuple[int, list[CorrectionIn
     with ThreadPoolExecutor(max_workers=run.max_workers) as pool:
         futures = [pool.submit(_run_chunk, run, chunk) for chunk in chunks]
         for future in as_completed(futures):
-            first_id, rows, usage, cost = future.result()
+            first_id, rows, usage, cost, _ = future.result()
             results[first_id] = (rows, usage, cost)
     corrected: list[CorrectedSegment] = []
     totals = {key: 0 for key in ("input_tokens", "cached_input_tokens", "output_tokens",
@@ -788,11 +836,44 @@ def _collect_chunks(run: ChunkRun, chunks: Sequence[tuple[int, list[CorrectionIn
 
 
 def _correct_chunks(run: ChunkRun, speech: Sequence[Any]
-                    ) -> tuple[list[CorrectedSegment], dict[str, int], int, float | None, bool]:
+                    ) -> tuple[list[CorrectedSegment], dict[str, int], int, float | None, bool,
+                               dict[str, Any] | None]:
     chunks = chunk_segments([CorrectionInput(item.start, item.end, item.text) for item in speech])
     if run.chunk_ordinals is not None:
         chunks = [chunk for ordinal, chunk in enumerate(chunks, 1) if ordinal in run.chunk_ordinals]
-    return _collect_chunks(run, chunks)
+    if run.fallback is None or not chunks:
+        return (*_collect_chunks(run, chunks), None)
+    return _run_first_chunk_pilot(run, chunks)
+
+
+def _run_first_chunk_pilot(run: ChunkRun, chunks: Sequence[tuple[int, list[CorrectionInput]]]
+                           ) -> tuple[Any, ...]:
+    first, remaining = chunks[0], chunks[1:]
+    pilot = _run_chunk(run, first)
+    if pilot[4] not in {FailureCategory.TRANSPORT, FailureCategory.MODEL_UNAVAILABLE}:
+        rest = _collect_chunks(run, remaining)
+        return _combine_chunk_runs((pilot[:4],), rest, len(chunks), None)
+    target = run.fallback
+    print(f"AI fallback: host={target.host} from={run.model or 'host default'} "
+          f"to={target.model or 'host default'} reason=first-chunk {pilot[4].value}")
+    default_run = ChunkRun(run.client, target.model, run.context, run.max_workers,
+                           invocation=target.invocation)
+    retried = _run_chunk(default_run, first)
+    rest = _collect_chunks(default_run, remaining)
+    return _combine_chunk_runs((retried[:4],), rest, len(chunks),
+                               {"mode": "fallback", "model": target.model or "host default",
+                                "reason": pilot[4].value, "chunks": list(range(1, len(chunks) + 1))})
+
+
+def _combine_chunk_runs(first: Sequence[tuple[Any, ...]], rest: tuple[Any, ...], count: int,
+                        attempt: dict[str, Any] | None) -> tuple[Any, ...]:
+    rows = [row for result in first for row in result[1]] + list(rest[0])
+    usage = {key: sum(getattr(result[2], key) for result in first) + rest[1][key]
+             for key in rest[1]}
+    costs = [result[3] for result in first]
+    cost_complete = (rest[4] or rest[2] == 0) and all(cost is not None for cost in costs)
+    cost = sum(costs) + (rest[3] or 0.0) if cost_complete else None
+    return rows, usage, count, cost, cost_complete, attempt
 
 
 def _write_correction_result(state: CorrectionStage, settings: CorrectionSettings,
@@ -819,12 +900,12 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
                              "segment_statuses": counts, "usage": result.usage}
     refused_chunks = _refused_chunk_numbers(rows)
     stage["refused_chunks"] = refused_chunks
-    stage["selection"] = _selection_manifest(settings)
-    stage["attempts"] = [result.attempt or {"mode": "initial", "provider": settings.provider,
-                                             "model": settings.model,
-                                             "chunks": list(range(1, result.chunk_count + 1)),
-                                             "usage": result.usage, "reported_cost_usd": result.reported_cost_usd,
-                                             "result_counts": counts}]
+    stage["selection"] = _selection_manifest(settings, result.attempt)
+    attempt = result.attempt or {"mode": "initial", "model": settings.model,
+                                 "chunks": list(range(1, result.chunk_count + 1))}
+    stage["attempts"] = [{**attempt, "provider": settings.provider, "usage": result.usage,
+                          "reported_cost_usd": result.reported_cost_usd if result.cost_complete else None,
+                          "result_counts": counts}]
     stage["reported_cost_usd"] = result.reported_cost_usd if result.cost_complete else None
     if consent is not None:
         stage["consent"] = consent
@@ -836,9 +917,10 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
     print(summary + (f" | refused chunks {', '.join(map(str, refused_chunks))}" if refused_chunks else ""))
 
 
-def _selection_manifest(settings: CorrectionSettings) -> dict[str, Any]:
+def _selection_manifest(settings: CorrectionSettings, attempt: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"host": settings.host, "model": settings.model, "model_role": settings.model_role,
-            "reason": settings.selection_reason, "fallback": False, "provider": settings.provider,
+            "reason": settings.selection_reason, "fallback": attempt is not None,
+            "provider": settings.provider,
             "endpoint_identity": settings.endpoint_identity, "locality": settings.locality}
 
 
@@ -858,9 +940,6 @@ def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request
     if not targets:
         print("CORRECTION: no refused chunks to retry")
         return 0
-    if not request.model:
-        print("--retry-refused requires an explicit higher --model", file=sys.stderr)
-        return 2
     if settings.provider != state.params.get("provider"):
         print("retry provider changed", file=sys.stderr)
         return 2
@@ -873,13 +952,13 @@ def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request
         accepted, _, error = ask_or_refuse_remote_ai(settings)
         if not accepted:
             return error or 4
-    if settings.provider not in {"claude-code", "codex"}:
+    if settings.provider not in {"claude-code", "codex", "openclaw"}:
         print("refused-chunk retry is supported for host-account providers", file=sys.stderr)
         return 2
     client = make_client(settings, deps)
     context = _build_stage_context(state.metadata, state.source.language or "unknown")
     run = ChunkRun(client, settings.model, context, 2, targets)
-    new_rows, new_usage, chunk_count, cost, cost_complete = _correct_chunks(run, state.speech)
+    new_rows, new_usage, chunk_count, cost, cost_complete, _ = _correct_chunks(run, state.speech)
     result = CorrectionResult(new_rows, new_usage, chunk_count, cost, cost_complete)
     return _write_retry_result(state, settings, retry_target, result)
 
@@ -969,7 +1048,7 @@ def _prepare_correction(video: Path, request: CorrectionRequest,
                                       settings.api_key, settings.allow_remote_ai, settings.no_correct,
                                       settings.interactive, None, settings.host, settings.default_model,
                                       settings.selection_reason, settings.model_role, settings.endpoint_identity)
-    retry_model = settings.model
+    retry_model = request.model if request.model is not None else settings.default_model
     if request.retry_refused:
         saved_manifest = _load_json(work / "manifest.json", {})
         saved_params = (saved_manifest.get("params") or {}).get("correct_transcript") or {}
@@ -1005,7 +1084,7 @@ def _run_loaded_correction(prepared: PreparedCorrection, request: CorrectionRequ
 def _continue_correction(state: CorrectionStage, settings: CorrectionSettings,
                          runtime: CorrectionRuntime) -> int:
     api_key = settings.api_key if settings.provider in {"openai", "local"} else (
-        "host-account" if settings.provider in {"claude-code", "codex"} else None)
+        "host-account" if settings.provider in {"claude-code", "codex", "openclaw"} else None)
     skip = correction_skip_reason(no_correct=settings.no_correct, source=state.source.source, api_key=api_key)
     if settings.provider == "none" and skip == "no API key":
         skip = (f"{runtime.missing_implicit_host} executable is unavailable" if runtime.missing_implicit_host
@@ -1033,35 +1112,61 @@ def _execute_correction(state: CorrectionStage, settings: CorrectionSettings,
                   else ModelInvocation.OVERRIDE)
     run = ChunkRun(client, settings.model, context, 1 if settings.locality == "local" else 2,
                    invocation=invocation)
-    corrected_rows, usage_totals, chunk_count, reported_cost, cost_complete = _correct_chunks(run, state.speech)
+    run = _fallback_enabled_run(run, settings)
+    corrected_rows, usage_totals, chunk_count, reported_cost, cost_complete, attempt = _correct_chunks(run, state.speech)
+    effective_model = attempt["model"] if attempt else settings.model
     corrected_rows = [CorrectedSegment(row.start, row.end, row.original_text, row.corrected_text,
-                                       row.status, settings.provider, settings.model) for row in corrected_rows]
+                                        row.status, row.provider or settings.provider,
+                                        row.model or effective_model) for row in corrected_rows]
     _write_correction_result(state, settings, consent,
                              CorrectionResult(corrected_rows, usage_totals, chunk_count,
-                                              reported_cost, cost_complete))
+                                               reported_cost, cost_complete, attempt))
     _print_escalation_if_needed(state, settings, runtime.request, consent)
     return 0
 
 
+def _fallback_enabled_run(run: ChunkRun, settings: CorrectionSettings) -> ChunkRun:
+    eligible = (settings.model_role == "low-cost" and settings.model != settings.default_model
+                and settings.provider in {"claude-code", "codex", "openclaw"})
+    if not eligible:
+        return run
+    invocation = ModelInvocation.OVERRIDE if settings.default_model else ModelInvocation.HOST_DEFAULT
+    fallback = ModelFallback(settings.host, settings.default_model, invocation)
+    return ChunkRun(run.client, run.model, run.context, run.max_workers,
+                    invocation=run.invocation, fallback=fallback)
+
+
 def _print_escalation_if_needed(state: CorrectionStage, settings: CorrectionSettings,
                                 request: CorrectionRequest, consent: dict[str, Any] | None) -> None:
-    from host_models import model_sibling
-    refused = state.manifest["stages"]["correct_transcript"].get("refused_chunks", [])
-    if refused and settings.model != settings.default_model and settings.provider in {"claude-code", "codex"}:
-        family_provider = "anthropic" if settings.provider == "claude-code" else "openai"
-        higher = model_sibling(family_provider, settings.model, "bigger") or settings.default_model
+    stage = state.manifest["stages"]["correct_transcript"]
+    refused = stage.get("refused_chunks", [])
+    attempts = stage.get("attempts", [])
+    effective_model = attempts[-1].get("model", settings.model) if attempts else settings.model
+    if effective_model == "host default":
+        effective_model = settings.default_model
+    choice = _escalation_choice(settings.provider, effective_model, settings.default_model)
+    if refused and choice and settings.provider in {"claude-code", "codex", "openclaw"}:
         command = [sys.executable, str(Path(__file__).resolve()), str(state.video), "--provider", settings.provider,
                    "--language", request.language, "--retry-refused"]
         if request.host:
             command.extend(("--host", request.host))
-        if higher:
-            command.extend(("--model", higher))
+        if choice.model:
+            command.extend(("--model", choice.model))
         if settings.locality == "local":
             command.extend(("--ai-locality", "local"))
         if consent:
             command.append("--allow-remote-ai")
         rendered = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
         print(f"Refused chunks: {', '.join(map(str, refused))}. Escalation command: {rendered}")
+
+
+def _escalation_choice(provider: str, effective: str | None,
+                       default: str | None) -> EscalationChoice | None:
+    from host_models import model_sibling
+    if effective == default:
+        return None
+    family_provider = "anthropic" if provider == "claude-code" else "openai"
+    return EscalationChoice(model_sibling(family_provider, effective, "bigger") or default)
 
 
 def run_correction(video: Path, request: CorrectionRequest | None = None,

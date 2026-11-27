@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -110,7 +110,7 @@ def report_ocr() -> bool:
     return True
 
 
-def report_correction() -> bool:
+def report_correction(environ: Mapping[str, str] | None = None, config_reader: Any = None) -> bool:
     """Report host, OpenAI, and declared-local correction readiness without secrets."""
     claude = shutil.which("claude")
     codex = shutil.which("codex") or shutil.which("codex.cmd")
@@ -119,11 +119,11 @@ def report_correction() -> bool:
     print(f"Codex: {codex or 'missing'}")
     print(f"OpenClaw: {openclaw or 'missing'}")
     print("Host providers use the host's authenticated account")
-    env = os.environ
+    env = environ if environ is not None else os.environ
     try:
         from host_models import ConfigReader, ExplicitInput, resolve_host_model
-        reader = ConfigReader(Path.cwd(), Path.home(),
-                              lambda path: path.read_text(encoding="utf-8") if path.is_file() else None)
+        reader = config_reader or ConfigReader(Path.cwd(), Path.home(),
+                                                lambda path: path.read_text(encoding="utf-8") if path.is_file() else None)
         host = resolve_host_model(env, reader, ExplicitInput())
         print(f"Resolved host: {host.host}")
         print(f"Default model: {host.default_model or 'host default'}")

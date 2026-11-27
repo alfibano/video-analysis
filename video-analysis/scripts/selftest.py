@@ -1175,9 +1175,11 @@ def check_correction_shared_helpers_and_speech_reader() -> bool:
 
 def check_correction_shared_runtime_helpers() -> bool:
     import correct_transcript as correction
+    from host_models import ConfigReader
     settings = correction.CorrectionSettings("openai", "test-model", "https://local.invalid/v1",
                                              "local", "local-no-key", True, False, False)
-    deps = correction.CorrectionDeps({}, client_factory=lambda **kwargs: kwargs)
+    deps = correction.CorrectionDeps({}, client_factory=lambda **kwargs: kwargs,
+        config_reader=ConfigReader(Path.cwd(), Path("/sentinel-test-home"), lambda path: None))
     client = correction.make_client(settings, deps)
     context = correction._build_stage_context({
         "title": "Title", "description": "Description", "chapters": [{"title": "Chapter"}]}, "fr")
@@ -1205,15 +1207,18 @@ def check_correction_consent_matrix() -> bool:
 
 def call_correction(video: Path, **options: Any) -> int:
     from correct_transcript import CorrectionDeps, CorrectionRequest, run_correction
+    from host_models import ConfigReader
     if options.get("client_factory") is not None and "provider" not in options:
         options["provider"] = "openai"
     request_fields = {"language", "model", "base_url", "locality", "allow_remote_ai",
-                      "no_correct", "api_key", "provider", "retry_refused"}
+                      "no_correct", "api_key", "provider", "retry_refused", "host"}
     request = CorrectionRequest(**{key: options.pop(key) for key in list(options) if key in request_fields})
-    deps = CorrectionDeps(options.pop("environ", __import__("os").environ),
+    reader = options.pop("config_reader", ConfigReader(Path.cwd(), Path("/sentinel-fixture-home"),
+                                                         lambda path: None))
+    deps = CorrectionDeps(options.pop("environ", {}),
                           options.pop("client_factory", None), options.pop("interactive", None),
                           options.pop("which", __import__("shutil").which),
-                          options.pop("subprocess_runner", subprocess.run))
+                          options.pop("subprocess_runner", subprocess.run), reader)
     if options:
         raise TypeError(f"unknown correction test options: {', '.join(options)}")
     return run_correction(video, request, deps)
@@ -1462,6 +1467,7 @@ def check_prose_refusals_are_retryable() -> bool:
 
 def check_retry_sends_only_refused_chunks() -> bool:
     import correct_transcript as correction
+    from host_models import ConfigReader
     from tools import make_temp_folder
     folder = make_temp_folder("correction-retry-refused-")
     video = folder / "sample.mp4"
@@ -1473,6 +1479,7 @@ def check_retry_sends_only_refused_chunks() -> bool:
     (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": segments}),
                                           encoding="utf-8")
     prompts = []
+    config_reads = []
     def runner(command, **kwargs):
         prompt = kwargs["input"]
         prompts.append((command[command.index("--model") + 1], prompt))
@@ -1485,7 +1492,9 @@ def check_retry_sends_only_refused_chunks() -> bool:
             "input_tokens": 1, "output_tokens": 1}}), stderr="")
     env = {"CLAUDECODE": "1"}
     deps = {"environ": env, "which": lambda command: "claude.exe" if command == "claude" else None,
-            "subprocess_runner": runner}
+            "subprocess_runner": runner,
+            "config_reader": ConfigReader(Path.cwd(), Path("/sentinel-fixture-home"),
+                                           lambda path: config_reads.append(path) or None)}
     initial_output = io.StringIO()
     with contextlib.redirect_stdout(initial_output):
         initial = call_correction(video, provider="claude-code", locality="local", **deps)
@@ -1503,7 +1512,197 @@ def check_retry_sends_only_refused_chunks() -> bool:
             and sys.executable in command_output and str(video) in command_output
             and stage["refused_chunks"] == [] and len(stage["attempts"]) == 2
             and output["segments"][40]["model"] in {"haiku", "claude-haiku-5-5"}
-            and all(row["model"] == "claude-sonnet-5-5" for row in output["segments"][:40]))
+            and all(row["model"] == "claude-sonnet-5-5" for row in output["segments"][:40])
+            and (Path.home() / ".claude/settings.json") not in config_reads)
+
+
+def check_host_adapters_preserve_routing_and_optional_model_flags() -> bool:
+    import correct_transcript as correction
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        if command[0] == "openclaw-bin":
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "ok", "final": "1\thello",
+                "usage": {"input_tokens": 2}, "model": "vendor/model", "provider": "vendor"}), stderr="")
+        if command[0] == "claude-bin":
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"result": "1\thello"}), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "1\thello"}}), stderr="")
+    correction.ClaudeCodeClient(executable="claude-bin", runner=runner).correct(
+        model=None, system_prompt="s", user_prompt="u", invocation=correction.ModelInvocation.HOST_DEFAULT)
+    correction.CodexClient(executable="codex-bin", runner=runner).correct(
+        model=None, system_prompt="s", user_prompt="u", invocation=correction.ModelInvocation.HOST_DEFAULT)
+    result = correction.OpenClawClient(executable="openclaw-bin", runner=runner).correct(
+        model="vendor/model", system_prompt="s", user_prompt="u")
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-openclaw-provenance-")
+    video = folder / "openclaw.mp4"
+    video.write_bytes(b"video")
+    work = folder / "openclaw.analysis"
+    work.mkdir()
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 0, "end": 1, "text": "same words"}]}), encoding="utf-8")
+    def openclaw_runner(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "completed", "final": "1\tsame words",
+            "usage": {"input_tokens": 3}, "model": "vendor/model", "provider": "vendor"}), stderr="")
+    integrated = call_correction(video, provider="openclaw", host="openclaw", locality="local", environ={},
+        which=lambda name: "openclaw-bin" if name == "openclaw" else None, subprocess_runner=openclaw_runner)
+    segment = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))["segments"][0]
+    return ("--model" not in calls[0] and "-m" not in calls[1]
+            and calls[2][:3] == ["openclaw-bin", "agent", "exec"]
+            and calls[2][calls[2].index("--model"):calls[2].index("--model") + 2] == ["--model", "vendor/model"]
+            and calls[2][-1] == "--json" and result.text == "1\thello" and result.usage.input_tokens == 2
+            and result.reported_model == "vendor/model" and result.reported_provider == "vendor"
+            and integrated == 0 and segment["model"] == "vendor/model" and segment["provider"] == "vendor")
+
+
+def check_low_cost_first_chunk_fallback_is_bounded_and_selective() -> bool:
+    import correct_transcript as correction
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-first-fallback-")
+    video = folder / "pilot.mp4"
+    video.write_bytes(b"video")
+    work = folder / "pilot.analysis"
+    work.mkdir()
+    segments = [{"start": i, "end": i + 1, "text": f"spoken words {i}"} for i in range(41)]
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": segments}), encoding="utf-8")
+    calls, output = [], io.StringIO()
+    def runner(command, **kwargs):
+        model = command[command.index("--model") + 1]
+        calls.append(model)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="connection reset")
+        ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", kwargs["input"])]
+        answer = "\n".join(f"{number}\tspoken words {number - 1}" for number in ids)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"result": answer}), stderr="")
+    with contextlib.redirect_stdout(output):
+        result = call_correction(video, provider="claude-code", locality="local",
+            environ={"CLAUDECODE": "1", "ANTHROPIC_MODEL": "claude-sonnet-5-5"},
+            which=lambda name: "claude-bin" if name == "claude" else None, subprocess_runner=runner)
+    manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+    stage = manifest["stages"]["correct_transcript"]
+    primary = (result == 0 and calls == ["haiku", "claude-sonnet-5-5", "claude-sonnet-5-5"]
+            and output.getvalue().count("AI fallback:") == 1
+            and stage["selection"]["fallback"] is True
+            and all(row["model"] == "claude-sonnet-5-5" for row in json.loads(
+                (work / "transcript.corrected.json").read_text(encoding="utf-8"))["segments"]))
+    one = [SimpleNamespace(start=0, end=1, text="same words")]
+    class ScriptedClient:
+        def __init__(self, first, second):
+            self.first, self.second, self.models = first, second, []
+        def correct(self, *, model, **kwargs):
+            self.models.append(model)
+            return self.first if len(self.models) == 1 else self.second
+    fallback_target = correction.ModelFallback("claude-code", "session", correction.ModelInvocation.OVERRIDE)
+    unavailable = ScriptedClient(correction.ProviderResult(None, error=True,
+        failure_category=correction.FailureCategory.MODEL_UNAVAILABLE), correction.ProviderResult("1\tsame words"))
+    unavailable_run = correction.ChunkRun(unavailable, "cheap", "", fallback=fallback_target)
+    unavailable_result = correction._correct_chunks(unavailable_run, one)
+    succeeds = ScriptedClient(correction.ProviderResult("1\tsame words"), correction.ProviderResult(None))
+    success_result = correction._correct_chunks(
+        correction.ChunkRun(succeeds, "cheap", "", fallback=fallback_target), one)
+    default_down = ScriptedClient(correction._failure_result(TimeoutError()),
+                                  correction._failure_result(TimeoutError()))
+    down_run = correction.ChunkRun(default_down, "cheap", "", fallback=fallback_target)
+    correction._correct_chunks(down_run, one)
+    non_switch = []
+    for response in (correction.ProviderResult(None, refusal=True),
+                     correction.ProviderResult("bad numbered output"),
+                     correction.ProviderResult(None, error=True, failure_category=correction.FailureCategory.PROVIDER)):
+        client = ScriptedClient(response, correction.ProviderResult("1\tsame words"))
+        result = correction._correct_chunks(correction.ChunkRun(client, "cheap", "", fallback=fallback_target), one)
+        non_switch.append(result[-1] is None and client.models == ["cheap"])
+    return (primary and unavailable.models == ["cheap", "session"]
+            and unavailable_result[-1]["reason"] == "model-unavailable"
+            and succeeds.models == ["cheap"] and success_result[-1] is None
+            and default_down.models == ["cheap", "session"] and all(non_switch))
+
+
+def check_selection_notice_precedes_calls_and_omits_secrets() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-notice-")
+    video = folder / "notice.mp4"
+    video.write_bytes(b"video")
+    work = folder / "notice.analysis"
+    work.mkdir()
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 0, "end": 1, "text": "original words"}]}), encoding="utf-8")
+    seen = []
+    captured = io.StringIO()
+    def runner(command, **kwargs):
+        seen.append(captured.getvalue())
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"result": "1\toriginal words"}), stderr="")
+    with contextlib.redirect_stdout(captured):
+        result = call_correction(video, provider="claude-code", locality="local", api_key="sentinel-secret",
+            environ={"CLAUDECODE": "1"}, which=lambda name: "claude-bin" if name == "claude" else None,
+            subprocess_runner=runner)
+    lines = captured.getvalue().splitlines()
+    return (result == 0 and lines[0].startswith("AI selection: host=claude-code ")
+            and "role=low-cost" in lines[0] and len(seen) == 1 and "AI selection:" in seen[0]
+            and "sentinel-secret" not in captured.getvalue())
+
+
+def check_selection_manifest_and_resume_identity_are_strict() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("correction-selection-identity-")
+    video = folder / "identity.mp4"
+    video.write_bytes(b"video")
+    work = folder / "identity.analysis"
+    work.mkdir()
+    (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 0, "end": 1, "text": "original words"}]}), encoding="utf-8")
+    client = lambda **kwargs: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **call: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content="1\toriginal words", refusal=False))], usage=None))))
+    first = call_correction(video, client_factory=client, api_key="fake", locality="local", environ={})
+    manifest_path = work / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    identity = manifest["params"]["correct_transcript"]["selection_identity"]
+    strict = set(identity) == {"host", "provider", "model", "endpoint_identity", "locality"}
+    changes_conflict = True
+    for key in tuple(identity):
+        old_value = identity[key]
+        identity[key] = "changed"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        changes_conflict = changes_conflict and call_correction(
+            video, client_factory=client, api_key="fake", locality="local", environ={}) == 3
+        identity[key] = old_value
+    del identity["host"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    second = call_correction(video, client_factory=client, api_key="fake", locality="local", environ={})
+    return first == 0 and strict and changes_conflict and second == 3
+
+
+def check_refusal_escalation_follows_family_table() -> bool:
+    import correct_transcript as correction
+    from host_models import model_sibling
+    no_bigger = correction._escalation_choice("codex", "GLM-5.3-Flash", "glm-session-default")
+    return (model_sibling("anthropic", "haiku", "bigger") == "sonnet"
+            and model_sibling("glm", "GLM-5.3-Flash", "bigger") is None
+            and model_sibling("anthropic", "sonnet", "bigger") == "sonnet"
+            and no_bigger == correction.EscalationChoice("glm-session-default")
+            and correction._escalation_choice("claude-code", "session-model", "session-model") is None)
+
+
+def check_setup_reports_resolved_host_readiness_without_secrets() -> bool:
+    import setup_tools
+    from host_models import ConfigReader
+    output = io.StringIO()
+    fake_reader = ConfigReader(Path.cwd(), Path("/sentinel-setup-home"), lambda path: None)
+    with patch.object(setup_tools.shutil, "which", side_effect=lambda name: "codex-bin" if name == "codex" else None), \
+            patch.object(setup_tools.importlib, "import_module", side_effect=ImportError()), \
+            contextlib.redirect_stdout(output):
+        setup_tools.report_correction({"CODEX_SESSION_ID": "offline", "OPENAI_API_KEY": "secret"}, fake_reader)
+    rendered = output.getvalue()
+    return ("Resolved host: codex" in rendered and "Resolved locality: remote" in rendered
+            and "secret" not in rendered and str(Path.home()) not in rendered)
+
+
+def check_analyze_video_forwards_explicit_host() -> bool:
+    import analyze_video
+    args = analyze_video._parser().parse_args(["sample.mp4", "--host", "openclaw"])
+    _, forwarded, _ = analyze_video._step_args(args, "sample.mp4")
+    return forwarded[forwarded.index("--host") + 1] == "openclaw"
 
 
 def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
@@ -1755,35 +1954,38 @@ def _font_available(font_module: object, name: str) -> bool:
 
 def check_setup_reports_correction_readiness_without_secrets() -> bool:
     import setup_tools
+    from host_models import ConfigReader
     fake = SimpleNamespace(__version__="1.2.3")
+    reader = ConfigReader(Path.cwd(), Path("/sentinel-setup-home"), lambda path: None)
     present_out, missing_out, host_out, codex_out, local_out = (io.StringIO(), io.StringIO(), io.StringIO(),
                                                                 io.StringIO(), io.StringIO())
     with patch.dict(__import__("os").environ, {"OPENAI_API_KEY": "sentinel-secret"}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
             patch.object(setup_tools.shutil, "which", return_value=None), \
             contextlib.redirect_stdout(present_out):
-        present = setup_tools.report_correction()
+        present = setup_tools.report_correction({"OPENAI_API_KEY": "sentinel-secret"}, reader)
     with patch.dict(__import__("os").environ, {}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
             patch.object(setup_tools.shutil, "which", return_value=None), \
             contextlib.redirect_stdout(missing_out):
-        missing = setup_tools.report_correction()
+        missing = setup_tools.report_correction({}, reader)
     with patch.dict(__import__("os").environ, {"CLAUDECODE": "1"}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
             patch.object(setup_tools.shutil, "which", side_effect=lambda name: "claude.exe" if name == "claude" else None), \
             contextlib.redirect_stdout(host_out):
-        claude = setup_tools.report_correction()
+        claude = setup_tools.report_correction({"CLAUDECODE": "1"}, reader)
     with patch.dict(__import__("os").environ, {"CODEX_SESSION_ID": "x"}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
             patch.object(setup_tools.shutil, "which", side_effect=lambda name: "codex.cmd" if name == "codex" else None), \
             contextlib.redirect_stdout(codex_out):
-        codex = setup_tools.report_correction()
+        codex = setup_tools.report_correction({"CODEX_SESSION_ID": "x"}, reader)
     with patch.dict(__import__("os").environ, {"VIDEO_ANALYSIS_CORRECT_PROVIDER": "local",
             "OPENAI_BASE_URL": "http://127.0.0.1/v1", "VIDEO_ANALYSIS_AI_LOCALITY": "local"}, clear=True), \
             patch.object(setup_tools.importlib, "import_module", return_value=fake), \
             patch.object(setup_tools.shutil, "which", return_value=None), \
             contextlib.redirect_stdout(local_out):
-        local = setup_tools.report_correction()
+        local = setup_tools.report_correction({"VIDEO_ANALYSIS_CORRECT_PROVIDER": "local",
+            "OPENAI_BASE_URL": "http://127.0.0.1/v1", "VIDEO_ANALYSIS_AI_LOCALITY": "local"}, reader)
     absent = setup_tools.missing_packages(module_lookup=lambda module: (_ for _ in ()).throw(ImportError())
                                           if module == "openai" else object())
     output = present_out.getvalue() + missing_out.getvalue()
@@ -1989,6 +2191,20 @@ def main() -> int:
             "correction prose refusals are retryable", check_prose_refusals_are_retryable)
         checks["correction retry sends only refused chunks"] = run_check(
             "correction retry sends only refused chunks", check_retry_sends_only_refused_chunks)
+        checks["host adapters preserve routing and optional model flags"] = run_check(
+            "host adapters preserve routing and optional model flags", check_host_adapters_preserve_routing_and_optional_model_flags)
+        checks["low-cost first chunk fallback is bounded and selective"] = run_check(
+            "low-cost first chunk fallback is bounded and selective", check_low_cost_first_chunk_fallback_is_bounded_and_selective)
+        checks["selection notice precedes calls and omits secrets"] = run_check(
+            "selection notice precedes calls and omits secrets", check_selection_notice_precedes_calls_and_omits_secrets)
+        checks["selection manifest and resume identity are strict"] = run_check(
+            "selection manifest and resume identity are strict", check_selection_manifest_and_resume_identity_are_strict)
+        checks["refusal escalation follows family table"] = run_check(
+            "refusal escalation follows family table", check_refusal_escalation_follows_family_table)
+        checks["setup reports resolved host readiness without secrets"] = run_check(
+            "setup reports resolved host readiness without secrets", check_setup_reports_resolved_host_readiness_without_secrets)
+        checks["analyze_video forwards explicit host"] = run_check(
+            "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
         checks["documentation contract current"] = run_check(
