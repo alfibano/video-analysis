@@ -2,29 +2,56 @@
 
 ## Transcript correction providers
 
-Correction selects `--provider auto|claude-code|codex|openai|local` (or
-`VIDEO_ANALYSIS_CORRECT_PROVIDER`) in this order: a Claude Code host marker, a Codex host marker,
-then `OPENAI_API_KEY`. If no provider is available, correction records a skip and exits 0. Claude
-Code uses the signed-in Haiku account (`claude-haiku-5-5`); Codex uses the signed-in Luna account
-(`gpt-6-luna`). OpenAI and explicitly selected local endpoints also default to `gpt-6-luna`. Use
-`--model` or `VIDEO_ANALYSIS_CORRECT_MODEL` to override; the pipeline exposes `--correct-model`.
+Correction selects `--provider auto|claude-code|codex|openclaw|openai|local` (or
+`VIDEO_ANALYSIS_CORRECT_PROVIDER`). Auto prefers a Claude Code host marker, then Codex, then
+`OPENAI_API_KEY`. Use `--host claude-code|codex|openclaw` or `VIDEO_ANALYSIS_HOST` to identify the
+host whose configured model should guide correction. OpenClaw has no automatic marker, so select it
+explicitly with `--host openclaw` or `VIDEO_ANALYSIS_HOST=openclaw`; agents should pass their known
+host to `analyze_video.py`.
 
-Provider identity does not imply endpoint locality, and `auto` does not infer a local provider from
-a base URL. Local endpoints require `--provider local`, a
-base URL, and `--ai-locality local` (or `VIDEO_ANALYSIS_AI_LOCALITY=local`). Local media sent to a
-remote endpoint requires `--allow-remote-ai` or interactive consent. Remote host correction sends
-transcript text plus title, description, language, and chapter titles; it does not send video, audio,
-frames, OCR text, or API keys. Claude and Codex use the host account; OpenAI and local endpoints use
-the SDK path. A local SDK endpoint can omit the API key.
+For the selected host provider, configuration supplies the session default model. The resolver uses
+a known same-family low-cost sibling when available: Claude Code uses its resolved Anthropic family,
+Codex its configured model/provider, and OpenClaw its configured `provider/model`. Unknown families
+use the host default. OpenAI SDK and local SDK routes retain their own configured/default model
+behavior. Use `--model` or `VIDEO_ANALYSIS_CORRECT_MODEL` to override correction; the pipeline
+exposes `--correct-model`. Codex configuration is read from its config and selected profile; live
+launch flags such as `--oss`, `-m`, or `--profile` cannot be observed, so detected values are
+configured defaults.
 
-Correction artifacts use schema 2 and record provider/model provenance per segment. Schema-v1,
-stale, or malformed correction output is ignored in favor of original speech. Refused chunks
-are retained and listed in the manifest. Use the printed `--retry-refused --model ...` command to
-retry only those chunks; escalation is never automatic. Claude defaults to `claude-haiku-5-5` and
-escalates to `claude-sonnet-5-5`; Codex defaults to `gpt-6-luna` and escalates to `gpt-5.6-sol`.
-Codex may need network-enabled execution to reach its host service. Exit 1 means processing failed;
-exit 2 means invalid configuration or input; exit 3 means completed state or output conflicts; exit 4
-means consent is required.
+Host configuration uses only model and provider facts: Claude Code checks its model environment
+value and settings files in local, project, then user order; Codex reads its model, provider, and
+selected profile; OpenClaw reads `agents.defaults.model.primary` from its JSON5 config. Configured
+values are never printed. If OpenClaw config cannot be parsed or has no primary model, correction
+leaves model selection to the host default.
+
+Before a provider call, stderr prints one `AI selection:` notice with host, model (or `host default`),
+role (`low-cost` or `default`), reason, and locality. Tell the user those values before correction.
+If the first low-cost chunk fails because the model is unavailable or unreachable, the tool switches
+once to the session default, prints one `AI fallback:` notice, and uses the default for that and all
+remaining chunks. Refusal, malformed output, validation failures, and other provider errors do not
+switch models. The correction manifest records host, model, role, reason, fallback, endpoint
+identity, and locality. A change to host, provider, model, endpoint identity, or locality exits 3.
+v0.3.0 correction manifests lack the selection identity and also exit 3 instead of resuming; rerun
+with the current route documented above. For local media, remote correction requires consent or
+`--allow-remote-ai` after consent.
+
+Provider identity does not imply locality. Host locality applies only when the selected provider is
+that host provider; OpenAI/local SDK routes do not inherit locality from the host. Correction
+locality comes from positive provider evidence or `--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY`.
+`VIDEO_ANALYSIS_HOST_AI` remains a backward-compatible step-4 declaration and does not make
+correction local. A loopback URL alone is remote. Local SDK endpoints require a base URL and
+`--ai-locality local` (or `VIDEO_ANALYSIS_AI_LOCALITY=local`); this declaration is a trust statement
+because a localhost proxy can forward data online.
+
+OpenClaw correction runs `openclaw infer model run --prompt-stdin [--model <provider/model>] --json`.
+The prompt is sent through stdin; this one-shot command starts no agent turn and loads no tools.
+OpenClaw live correction and its JSON envelope fields are `UNVERIFIED-LIVE`; offline coverage uses
+a fake runner. Remote correction sends transcript text and title, description, language, and chapter
+titles, but not video, audio, frames, OCR text, or API keys. Correction artifacts use schema 2 and
+record provider/model provenance per segment. Refused chunks remain in the manifest; the printed
+`--retry-refused` command retries only those chunks and escalation is never automatic. Exit 1 means
+processing failed; exit 2 means invalid configuration or input; exit 3 means completed state or
+output conflicts; exit 4 means consent is required.
 
 A [Claude Code](https://claude.com/claude-code) skill that lets an agent **read a local video**:
 what is **seen** (sampled frames, timestamped contact sheets, screen changes, exact-time frames) and
@@ -182,7 +209,7 @@ Analysis outputs stay in `<video>.analysis/` next to the video.
 
 ## Status
 
-v0.3.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
+v0.4.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License
 

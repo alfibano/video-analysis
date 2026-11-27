@@ -1,5 +1,35 @@
 # Release notes — video-analysis
 
+## v0.4.0 — 2026-11-27 — host-aware model routing
+
+### Added
+- Host-aware correction for Claude Code, Codex, and explicitly selected OpenClaw. The resolver
+  reads each host's configured session default and selects a known low-cost sibling from the same
+  family; unknown families use the host default. OpenAI and local SDK routes retain their own model
+  behavior.
+- One stderr selection notice before correction, with host, model (or `host default`), role, reason,
+  and locality. Only a transport or model-unavailable failure on the first low-cost chunk triggers
+  one switch to the session default; the fallback notice is printed once and the remaining chunks
+  use that default. Refusals and invalid output do not trigger a switch.
+- Selection provenance and strict resume identity for host, provider, model, endpoint identity, and
+  locality. A v0.3.0 correction manifest lacks the identity and exits 3 rather than resuming.
+- Refusal escalation follows the model family and remains user-triggered, limited to refused chunks.
+
+### Changed
+- Locality is local only with positive provider evidence or an explicit locality declaration; a
+  loopback endpoint alone remains remote. Host locality applies to correction only when the selected
+  provider is that host provider. `VIDEO_ANALYSIS_HOST_AI` remains the backward-compatible step-4
+  declaration and does not make correction local.
+- Step 4 uses the session default model; correction may use its low-cost sibling. The model, role,
+  reason, and locality are disclosed before correction and before step-4 writing.
+- OpenClaw uses `openclaw infer model run --prompt-stdin [--model <provider/model>] --json`. The
+  prompt travels on stdin; this one-shot provider command starts no agent turn and loads no tools.
+  OpenClaw correction is `UNVERIFIED-LIVE`; its live envelope fields are unverified and coverage
+  uses an offline fake runner.
+
+### Measured
+- Self-test: default 89/89; `--full` 91/91.
+
 ## v0.3.0 — 2026-11-27 — transcript correction
 
 ### Added

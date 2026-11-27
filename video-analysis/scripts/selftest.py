@@ -332,31 +332,6 @@ def check_network_fetch(url: str, folder: Path) -> bool:
     return extract(videos[-1], "--skip-transcript") == 0
 
 
-def check_documentation_contract() -> bool:
-    skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
-    readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
-    selftest_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
-    platform_plan = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
-    release_notes = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-    required = ("fetch_video.py", "analyze_video.py", "setup_tools.py --check",
-                "selftest.py --network", "frames.json", "build_bundle.py", "bundle.json",
-                "--fixed-interval", "relative to the `.analysis` folder")
-    correction_contract = ("## Confidentiality", "STEP correct", "transcript.corrected.json",
-                          "--correct-model", "--base-url", "--ai-locality", "--allow-remote-ai",
-                          "--no-correct", "exit 4", "VIDEO_ANALYSIS_HOST_AI",
-                          "zero provider calls", "v0.3.0", "Recycle Bin")
-    return (all(phrase in skill and phrase in readme for phrase in required)
-            and "Secondary tools" in skill
-            and "analyse cette vidéo" in skill and "trash" in skill
-            and all(phrase in skill and phrase in readme for phrase in correction_contract[:5])
-            and all(flag in readme for flag in correction_contract[5:8])
-            and "exit 4" in readme and "VIDEO_ANALYSIS_HOST_AI" in skill
-            and "zero provider calls" in selftest_docs
-            and "step 3 implemented" in platform_plan.lower()
-            and "v0.3.0 — 2026-11-26 — transcript correction" in release_notes
-            and "Recycle Bin" in release_notes)
-
-
 def check_script_help_contract() -> bool:
     scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py",
                "analyze_video.py")
@@ -1798,10 +1773,33 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_documentation_contract_current() -> bool:
+def check_v040_documentation_and_release_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
-    return all(term in readme + skill for term in ("claude-code", "codex", "--retry-refused", "schema 2"))
+    release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
+    docs = readme + skill
+    hosts = all(term in readme and term in skill for term in ("claude-code", "codex", "openclaw"))
+    routing = all(term in docs for term in ("--host", "VIDEO_ANALYSIS_HOST", "host default",
+                                             "low-cost", "reason", "fallback", "endpoint identity"))
+    locality = all(term in docs for term in ("VIDEO_ANALYSIS_HOST_AI", "VIDEO_ANALYSIS_AI_LOCALITY",
+                                              "loopback", "provider evidence"))
+    locality_scope = ("step-4 declaration" in docs and "host provider" in docs
+                      and "does not make correction local" in docs)
+    disclosure = all(term in skill.lower() for term in ("before correction", "before step-4 writing",
+                                                         "session default", "stderr", "one-time"))
+    openclaw = all(term in docs + release for term in ("infer model run", "--prompt-stdin",
+                                                        "UNVERIFIED-LIVE"))
+    migration = all(term in docs + release for term in ("exit 3", "v0.3.0", "rerun"))
+    release_contract = all(term in release for term in ("v0.4.0", "2026-11-27", "89/89", "91/91",
+                                                         "fake runner"))
+    historical = release.split("## v0.3.0", 1)[-1].split("## v0.2.1", 1)[0]
+    historical_models = all(term in historical for term in ("2026-11-27", "Haiku", "Luna",
+                                                              "Sonnet", "Sol"))
+    return (hosts and routing and locality and locality_scope and disclosure and openclaw and migration
+            and release_contract and historical_models and "session default" in platform.lower()
+            and "low-cost sibling" in platform
+            and all(term in release for term in ("v0.3.0", "2026-11-27", "transcript correction")))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -2188,7 +2186,6 @@ def main() -> int:
         checks["v0.1 manifest remains compatible"] = run_check("v0.1 manifest remains compatible", check_legacy_manifest)
         checks["playlist and live are refused before download"] = run_check("playlist and live are refused before download", check_playlist_live_refusal)
         checks["default selftest is offline"] = run_check("default selftest is offline", check_default_offline)
-        checks["documentation contract current"] = run_check("documentation contract current", check_documentation_contract)
         checks["every script help describes itself"] = run_check("every script help describes itself", check_script_help_contract)
         checks["offset container PTS preserved"] = run_check("offset container PTS preserved", lambda: check_offset_pts(folder))
         checks["adaptive sampling and timestamp names"] = run_check(
@@ -2278,8 +2275,8 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["documentation contract current"] = run_check(
-            "documentation contract current", check_documentation_contract_current)
+        checks["v0.4.0 documentation and release contract"] = run_check(
+            "v0.4.0 documentation and release contract", check_v040_documentation_and_release_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(

@@ -27,20 +27,52 @@ may still forward data online. Use `--no-correct` to keep correction fully offli
 
 ## Transcript correction providers
 
-Select `--provider auto|claude-code|codex|openai|local` (or
-`VIDEO_ANALYSIS_CORRECT_PROVIDER`). Auto prefers a detected Claude Code host, then a detected Codex
-host, then OpenAI when an API key exists. With no provider, correction records a skip. Claude Code
-uses the signed-in Haiku account; Codex defaults to the signed-in Luna account. These host providers need no
-OpenAI key. OpenAI and local compatible endpoints use the SDK. A local endpoint requires an explicit
-base URL and local trust declaration. Local media sent remotely requires interactive consent or
-`--allow-remote-ai`; EOF or noninteractive output denies consent with exit 4.
+Select `--provider auto|claude-code|codex|openclaw|openai|local` (or
+`VIDEO_ANALYSIS_CORRECT_PROVIDER`). `--host claude-code|codex|openclaw` or
+`VIDEO_ANALYSIS_HOST` identifies the host whose configured model should guide correction. Auto
+prefers a detected Claude Code host, then Codex, then OpenAI when an API key exists. OpenClaw has no
+automatic host marker, so pass `--host openclaw` or set `VIDEO_ANALYSIS_HOST=openclaw`. Agents must
+pass their known host explicitly to `analyze_video.py`. Without an available provider, correction
+records a skip.
 
-Remote host correction sends transcript text and title, description, language, and chapter titles.
-It does not send video, audio, frames, OCR text, or API keys. Correction artifacts use schema 2 and
-include provider/model provenance for each segment. If chunks are refused, report their count and
-ordinals and offer the printed higher-model `--retry-refused` command; never run escalation
-automatically. Codex's higher retry model is `gpt-5.6-sol`. Codex may require network-enabled execution to reach its host service. Reserve main
-Opus/Sol use for the future study-sheet stage, except explicit refused-chunk escalation.
+For a host provider, the resolver reads that host's configured session default and chooses a known
+low-cost sibling from the same model family. Claude Code uses its resolved Claude model, Codex uses
+the model in its config/profile, and OpenClaw uses `agents.defaults.model.primary` from its config.
+Each host uses a known low-cost sibling when available; an unknown family uses that host's default.
+OpenAI SDK correction uses its configured model, and local SDK correction retains its SDK default.
+`--model` or `VIDEO_ANALYSIS_CORRECT_MODEL` explicitly selects a correction model. Before
+correction starts, stderr shows `AI selection:` with host, model (or `host default`), role
+(`low-cost` or `default`), reason, and locality. Tell the user those values before correction.
+
+Only the first low-cost chunk can trigger one-time reachability fallback to the host session default.
+Stderr then shows one `AI fallback:` notice, and that chunk plus the remaining chunks use the default.
+Refusal, malformed output, validation failure, and other provider errors do not trigger this
+fallback. Local media requires consent whenever correction's selected provider is remote, unless
+the user has already granted consent or the command includes `--allow-remote-ai` after consent.
+EOF or noninteractive output denies consent with exit 4.
+
+Host locality applies only when the selected provider is that host provider. An OpenAI or local SDK
+provider does not inherit locality from a detected host; correction locality comes from positive
+provider evidence or `--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY`. `VIDEO_ANALYSIS_HOST_AI` remains
+the backward-compatible step-4 locality declaration and does not make correction local. Loopback
+URLs alone are remote. A local SDK endpoint requires a base URL and an explicit local trust
+declaration. Locality is a trust statement: a localhost proxy may still forward data online.
+
+OpenClaw correction uses `openclaw infer model run --prompt-stdin [--model <provider/model>] --json`.
+It sends the prompt on stdin and runs a one-shot provider completion without an agent turn or tools.
+OpenClaw's live JSON envelope fields are unverified; offline coverage uses a fake runner. Correction
+artifacts use schema 2 and include provider/model provenance for each segment. If chunks are refused,
+report their count and ordinals and offer the printed `--retry-refused` command; never run escalation
+automatically. A correction manifest from v0.3.0 lacks the new selection identity and exits 3 rather
+than resuming. Rerun correction with the current documented route; use `--allow-remote-ai` only after
+consenting if the local-media command requires it.
+
+The step-4 writer always uses the session default model, never the correction low-cost sibling.
+Before step-4 writing, tell the user the host, session default model, role `default`, reason, and
+locality. Step-4 locality uses the selected host provider's resolved locality or the explicit
+`--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration; `VIDEO_ANALYSIS_HOST_AI` remains its
+backward-compatible declaration for this step. Codex may require network-enabled execution to
+reach its host service.
 
 ## Where things go — the owner's hard rule
 
@@ -174,9 +206,13 @@ e. Write the analysis (step 4).
 
 ### Step-4 host locality contract
 
-The host model locality is `VIDEO_ANALYSIS_HOST_AI=local|remote`, defaulting to `remote`. Before
-writing a study sheet from local media with a remote host model, ask the user for consent. A URL
-video or an explicitly local host model needs no confirmation.
+Use the session default model to write step 4; correction may use its same-family low-cost sibling.
+Resolve locality from the selected host provider's positive locality evidence or an explicit
+`--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration. `VIDEO_ANALYSIS_HOST_AI=local|remote`
+remains a backward-compatible step-4 declaration and does not make correction local. A loopback URL
+alone is remote. Before step-4 writing, disclose the host, model, role `default`, reason, and locality
+to the user. For local media and a remote model, ask for consent. A URL video or explicitly local
+model needs no confirmation.
 
 ## 4. Report — keep three things apart
 

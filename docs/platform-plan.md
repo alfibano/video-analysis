@@ -1,6 +1,6 @@
 # Platform evolution — design and delivery plan
 
-Status: **steps 1 and 2 implemented; step 3 implemented (transcript correction); scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-26).
+Status: **steps 1 and 2 implemented; step 3 implemented with v0.4.0 host-aware model routing; scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-27).
 
 ## Step 2 — aligned bundle
 
@@ -28,7 +28,7 @@ smart" work; the chief model only writes the final synthesis from a prepared bun
 | Frames with exact container timestamps, denser when the screen moves | script (ffmpeg) |
 | On-screen text (OCR) | script |
 | Transcript pass 1 | faster-whisper, local |
-| Transcript pass 2 (misheard words, glossary from metadata/OCR) | cheap online model (GPT Luna class) |
+| Transcript pass 2 (misheard words, glossary from metadata/OCR) | selected host's resolved session default or its known same-family low-cost sibling |
 | Pick the most telling frame per chapter | cheap model |
 | Outline, themes, key moments, sheet text | chief model, text bundle + 6–20 frames |
 | PDF / PPTX rendering, time-code links | script, template |
@@ -61,10 +61,14 @@ slower, did not fit in GPU memory and saturated RAM; an online model is needed a
 sheet (step 4). Part of the remaining WER is editorial: human subtitles drop fillers and lightly
 reword, which a correction must not reproduce.
 
-Correction now routes through the host's signed-in Claude Haiku or Codex Luna account when detected,
-with OpenAI as the outside-host path and an explicitly declared local endpoint as an option. Only
-refused chunks may be escalated to Sonnet or Codex `gpt-5.6-sol`; the user must run the offered
-command. Main Opus/Sol use remains reserved for the future study-sheet stage.
+Correction resolves a configured session default for Claude Code, Codex, or explicitly selected
+OpenClaw and uses a known same-family low-cost sibling when available. OpenClaw is supported but
+live-unverified; its offline tests use a fake runner. OpenAI remains the SDK route outside a host,
+with explicitly declared local endpoints as an option. A first-chunk reachability failure can switch
+once from low-cost to the session default. Only refused chunks may be escalated to a family sibling
+or the session default; the user must run the offered command. Step 4 always uses the session default
+model, while correction may use its low-cost sibling. Main Opus/Sol use remains reserved for the
+future study-sheet stage.
 
 ## Step 1 — acceptance criteria
 1. `fetch_video.py <url>` downloads one video (playlist and live refused; exit codes 0/1/2/3) and
