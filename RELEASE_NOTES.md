@@ -1,5 +1,12 @@
 # Release notes — video-analysis
 
+## v0.6.1 — 2026-11-27 — undistorted sheet images
+
+### Fixed
+- Study-sheet frames kept a 1-inch-wide height and were then widened, so every image was stretched
+  (3.7:1 instead of 16:9). Images are now inserted at their final width and keep their aspect ratio;
+  the DOCX layout check asserts the ratio.
+
 ## v0.6.0 — 2026-11-27 — bounded comments and localized study sheets
 
 ### Added

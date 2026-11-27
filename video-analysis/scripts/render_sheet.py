@@ -158,9 +158,9 @@ def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, An
         table.columns[0].width, table.columns[1].width = text_width, image_width
         table.cell(0, 0).width, table.cell(0, 1).width = text_width, image_width
         table.cell(0, 0).paragraphs[0].add_run(block["text"])
-        picture = table.cell(0, 1).paragraphs[0].add_run().add_picture(str(analysis_dir / Path(*frame["file"].split("/"))), width=Inches(1))
-        max_width = max(1, image_width - Inches(.18))
-        picture.width = max_width
+        # Width only: python-docx then derives the height from the image, preserving its aspect ratio.
+        table.cell(0, 1).paragraphs[0].add_run().add_picture(
+            str(analysis_dir / Path(*frame["file"].split("/"))), width=max(1, image_width - Inches(.18)))
         caption = table.cell(0, 1).add_paragraph(style=_style(document, "Caption"))
         caption.add_run(sheet["labels"]["figure"] + " "); _add_linked_time(caption, sheet, frame["time"])
     for callout in chapter["callouts"]:

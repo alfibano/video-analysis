@@ -827,7 +827,8 @@ def check_docx_v2_layout() -> bool:
         targets = [rel.target_ref for rel in doc.part.rels.values() if rel.reltype.endswith("/hyperlink")]
         return ("E3F0FB" in xml and 'w:val="single"' in xml and "w:insideV" in xml and 'w:insideH w:val="nil"' in xml
                 and "https://example.org/ref" in targets and "ℹ" in xml
-                and len(doc.inline_shapes) == 1 and doc.inline_shapes[0].width < 6 * 914400 * .38)
+                and len(doc.inline_shapes) == 1 and doc.inline_shapes[0].width < 6 * 914400 * .38
+                and abs(doc.inline_shapes[0].width / doc.inline_shapes[0].height - 12 / 8) < 0.01)
 
 
 def check_prepare_v2_identity() -> bool:
