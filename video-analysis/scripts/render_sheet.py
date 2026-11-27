@@ -40,9 +40,18 @@ def _hyperlink(paragraph, text: str, target: str) -> None:
     hyperlink.set(qn("r:id"), relation)
     run = OxmlElement("w:r")
     properties = OxmlElement("w:rPr")
-    style = OxmlElement("w:rStyle")
-    style.set(qn("w:val"), "Hyperlink")
-    properties.append(style)
+    try:
+        paragraph.part.document.styles["Hyperlink"]
+    except KeyError:
+        color = OxmlElement("w:color")
+        color.set(qn("w:val"), "0563C1")
+        underline = OxmlElement("w:u")
+        underline.set(qn("w:val"), "single")
+        properties.extend((color, underline))
+    else:
+        style = OxmlElement("w:rStyle")
+        style.set(qn("w:val"), "Hyperlink")
+        properties.append(style)
     run.append(properties)
     text_node = OxmlElement("w:t")
     text_node.text = text
@@ -91,7 +100,6 @@ def _add_linked_time(paragraph, sheet: Mapping[str, Any], seconds: float) -> Non
 
 def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any],
                     analysis_dir: Path) -> None:
-    from sheet_schema import build_seek_link, format_hhmmss
     heading = _paragraph(document, style="Heading 1")
     _add_linked_time(heading, sheet, chapter["start"])
     heading.add_run(" — " + chapter["title"])
@@ -106,12 +114,7 @@ def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, An
     document.add_picture(str(analysis_dir / Path(*frame["file"].split("/"))), width=width)
     caption = _paragraph(document, style="Caption")
     caption.add_run(sheet["labels"]["figure"] + " ")
-    stamp = format_hhmmss(frame["time"])
-    target = build_seek_link(sheet["source"].get("url"), frame["time"])
-    if target:
-        _hyperlink(caption, stamp, target)
-    else:
-        caption.add_run(stamp)
+    _add_linked_time(caption, sheet, frame["time"])
 
 
 def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path,
@@ -159,58 +162,85 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+class _RenderError(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _render_inputs(video: Path, template: Path | None) -> tuple[Path, Path, Path, Path, Path, Path | None]:
+    video = video.expanduser().resolve()
+    if not video.is_file():
+        raise _RenderError(2, "video does not exist")
+    analysis = video.parent / f"{video.stem}.analysis"
+    paths = (analysis / "manifest.json", analysis / "bundle.json", analysis / "sheet.json")
+    if not analysis.is_dir() or not all(path.is_file() for path in paths):
+        raise _RenderError(2, "analysis folder, manifest.json, bundle.json, or sheet.json is missing")
+    if template is not None:
+        template = template.expanduser().resolve()
+        if template.suffix.lower() not in {".docx", ".dotx"}:
+            raise _RenderError(2, "template must use .docx or .dotx")
+        if not template.is_file():
+            raise _RenderError(2, "template does not exist")
+    return video, analysis, *paths, template
+
+
+def _prepared_sheet(manifest_path: Path, bundle_path: Path, sheet_path: Path,
+                    analysis: Path) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    manifest = _read_manifest(manifest_path)
+    prep = manifest["stages"].get("sheet_prepare")
+    if not isinstance(prep, dict) or prep.get("status") != "ok":
+        raise _RenderError(4, "successful sheet preparation is required")
+    prep_params = manifest["params"].get("sheet_prepare")
+    if not isinstance(prep_params, dict):
+        raise _RenderError(3, "sheet preparation parameters are missing")
+    bundle_digest = _digest(bundle_path)
+    if prep_params.get("bundle_sha256") != bundle_digest:
+        raise _RenderError(3, "bundle digest changed since sheet preparation")
+    from sheet_schema import load_sheet
+    expected = {"host": prep_params.get("host"), "model": prep_params.get("model"), "role": "default"}
+    return manifest, bundle_digest, load_sheet(sheet_path, analysis_dir=analysis,
+        expected_bundle_sha256=bundle_digest, expected_writer=expected)
+
+
+def _render_params(sheet_path: Path, template: Path | None) -> dict[str, Any]:
+    return {"sheet_sha256": _digest(sheet_path),
+            "template_sha256": _digest(template) if template else "builtin", "schema_version": 1}
+
+
+def _resume_decision(output_path: Path, output_name: str, manifest: Mapping[str, Any],
+                     render_params: Mapping[str, Any]) -> int | None:
+    if not output_path.exists():
+        return None
+    stages, params = manifest["stages"], manifest["params"]
+    stage, old_params = stages.get("sheet_render", {}), params.get("sheet_render")
+    if (isinstance(stage, dict) and stage.get("status") == "ok"
+            and stage.get("output") == output_name and old_params == render_params):
+        print("sheet render resumed")
+        return 0
+    raise _RenderError(3, "render conflict: rename or move the existing DOCX before rerendering")
+
+
 def run_render(video: Path, template: Path | None = None) -> int:
     try:
-        video = video.expanduser().resolve()
-        if not video.is_file():
-            print("video does not exist", file=sys.stderr); return 2
-        analysis = video.parent / f"{video.stem}.analysis"
-        manifest_path, bundle_path, sheet_path = (analysis / "manifest.json", analysis / "bundle.json",
-                                                    analysis / "sheet.json")
-        if not analysis.is_dir() or not manifest_path.is_file() or not bundle_path.is_file() or not sheet_path.is_file():
-            print("analysis folder, manifest.json, bundle.json, or sheet.json is missing", file=sys.stderr)
-            return 2
-        if template is not None:
-            template = template.expanduser().resolve()
-            if template.suffix.lower() not in {".docx", ".dotx"}:
-                print("template must use .docx or .dotx", file=sys.stderr); return 2
-            if not template.is_file():
-                print("template does not exist", file=sys.stderr); return 2
-        manifest = _read_manifest(manifest_path)
-        prep = manifest["stages"].get("sheet_prepare")
-        if not isinstance(prep, dict) or prep.get("status") != "ok":
-            print("successful sheet preparation is required", file=sys.stderr); return 4
-        prep_params = manifest["params"].get("sheet_prepare")
-        if not isinstance(prep_params, dict):
-            print("sheet preparation parameters are missing", file=sys.stderr); return 3
-        bundle_digest = _digest(bundle_path)
-        if prep_params.get("bundle_sha256") != bundle_digest:
-            print("bundle digest changed since sheet preparation", file=sys.stderr); return 3
-        expected_writer = {"host": prep_params.get("host"), "model": prep_params.get("model"),
-                           "role": "default"}
-        from sheet_schema import load_sheet
-        sheet = load_sheet(sheet_path, analysis_dir=analysis,
-            expected_bundle_sha256=bundle_digest, expected_writer=expected_writer)
-        render_params = {"sheet_sha256": _digest(sheet_path),
-                         "template_sha256": _digest(template) if template else "builtin",
-                         "schema_version": 1}
+        video, analysis, manifest_path, bundle_path, sheet_path, template = _render_inputs(video, template)
+        manifest, _, sheet = _prepared_sheet(manifest_path, bundle_path, sheet_path, analysis)
+        params = _render_params(sheet_path, template)
         output_name = f"{video.stem}.docx"
         output_path = analysis / output_name
-        stage = manifest["stages"].get("sheet_render", {})
-        old_params = manifest["params"].get("sheet_render")
-        if output_path.exists():
-            if (isinstance(stage, dict) and stage.get("status") == "ok"
-                    and stage.get("output") == output_name and old_params == render_params):
-                print("sheet render resumed"); return 0
-            print("render conflict: rename or move the existing DOCX before rerendering", file=sys.stderr)
-            return 3
+        resumed = _resume_decision(output_path, output_name, manifest, params)
+        if resumed is not None:
+            return resumed
         document = render_document(sheet, analysis_dir=analysis, template=template)
         document.save(output_path)
-        manifest["params"]["sheet_render"] = render_params
+        manifest["params"]["sheet_render"] = params
         manifest["stages"]["sheet_render"] = {"status": "ok", "output": output_name}
         _write_manifest(manifest_path, manifest)
         print(f"sheet rendered: {output_path}")
         return 0
+    except _RenderError as error:
+        print(str(error), file=sys.stderr)
+        return error.code
     except ImportError as error:
         print(f"rendering dependency unavailable ({error}); run setup_tools.py", file=sys.stderr)
         return 1

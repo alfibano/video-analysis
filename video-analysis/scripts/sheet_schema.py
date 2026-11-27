@@ -168,7 +168,8 @@ def _validate_chapters(chapters: Any, analysis_dir: Path) -> None:
         for key in ("title", "text"):
             _text(chapter[key], f"{field}.{key}")
         start, end = chapter["start"], chapter["end"]
-        _number(start, f"{field}.start"); _number(end, f"{field}.end")
+        _number(start, f"{field}.start")
+        _number(end, f"{field}.end")
         if not 0 <= start < end:
             _fail(field, "must satisfy 0 <= start < end")
         if start < previous_end:
@@ -194,7 +195,8 @@ def _validate_glossary(glossary: Any) -> None:
     for index, entry in enumerate(glossary):
         field = f"glossary[{index}]"
         _keys(entry, ("term", "definition"), field)
-        _text(entry["term"], f"{field}.term"); _text(entry["definition"], f"{field}.definition")
+        _text(entry["term"], f"{field}.term")
+        _text(entry["definition"], f"{field}.definition")
 
 
 def validate_sheet(value: Any, *, analysis_dir: Path, expected_bundle_sha256: str,

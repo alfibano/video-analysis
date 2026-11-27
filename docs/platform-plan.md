@@ -1,6 +1,6 @@
 # Platform evolution — design and delivery plan
 
-Status: **steps 1 and 2 implemented; step 3 implemented with v0.4.0 host-aware model routing; scene-aware/adaptive sampling and relative bundle paths delivered** (2026-11-27).
+Status: **steps 1–4 implemented in v0.5.0; scene-aware/adaptive sampling, relative bundle paths, host-default sheet writing, and editable DOCX rendering delivered** (2026-11-27).
 
 ## Step 2 — aligned bundle
 
@@ -16,11 +16,11 @@ There is no description timestamp parser, no bundle.md, and no nearest-frame fal
 warms the model once, while `--skip-ocr` records an intentional omission.
 
 ## Vision
-Turn the `video-analysis` skill into a learning platform: from a local or online video, produce a
-study sheet (PDF or PowerPoint) with introduction, summary, chapter-by-chapter text, the most
-telling screenshot per chapter and a link to its time code. AI stays at the centre, but every
-mechanical task is done by scripts (zero tokens); cheap or local models take the "simple but
-smart" work; the chief model only writes the final synthesis from a prepared bundle.
+Turn the `video-analysis` skill into a learning platform: from a local or online video, produce an
+editable Word `.docx` study sheet with introduction, summary, chapter-by-chapter text, the most
+telling screenshot per chapter and a link to its time code. PDF/PPTX and other formats remain later
+work. Scripts handle mechanical tasks; the selected host session default model writes the sheet from
+a prepared bundle.
 
 | Stage | Who |
 |---|---|
@@ -29,9 +29,9 @@ smart" work; the chief model only writes the final synthesis from a prepared bun
 | On-screen text (OCR) | script |
 | Transcript pass 1 | faster-whisper, local |
 | Transcript pass 2 (misheard words, glossary from metadata/OCR) | selected host's resolved session default or its known same-family low-cost sibling |
-| Pick the most telling frame per chapter | cheap model |
-| Outline, themes, key moments, sheet text | chief model, text bundle + 6–20 frames |
-| PDF / PPTX rendering, time-code links | script, template |
+| Pick the most telling frame per chapter | host agent after viewing the chapter frames |
+| Sheet outline, themes, key moments, and text in `sheet.json` | selected host session default model, text bundle + selected frames |
+| Validate and render editable DOCX with time-code links | script, built-in formatting or `.docx` / `.dotx` template |
 | Archive working folder as zip; recycle bin only on explicit option | script |
 
 Owner decisions: video kept intact (sponsor segments listed, not cut); recycle bin only on an
@@ -40,8 +40,9 @@ models dropped after the 2026-11-26 benchmark); installable in minutes on Window
 reusing tools already present.
 
 Step order: 1 fetch + metadata + exact timestamps → 2 per-chapter aligned bundle (speech + frames +
-OCR) → 3 transcript correction (cheap online model) → 4 PDF/PPTX sheet → later: knowledge base,
-review, mobile.
+OCR) → 3 transcript correction (cheap online model) → 4 `prepare_sheet.py` → host writes
+`sheet.json` → `render_sheet.py` produces editable DOCX. Later: PDF/PPTX, provider adapter/UI,
+knowledge base, review, and mobile.
 
 ## Step 3 — correction model benchmark (2026-11-26)
 Whisper `small` output corrected in chunks of 40 segments with one prompt, scored as word error
@@ -67,8 +68,8 @@ live-unverified; its offline tests use a fake runner. OpenAI remains the SDK rou
 with explicitly declared local endpoints as an option. A first-chunk reachability failure can switch
 once from low-cost to the session default. Only refused chunks may be escalated to a family sibling
 or the session default; the user must run the offered command. Step 4 always uses the session default
-model, while correction may use its low-cost sibling. Main Opus/Sol use remains reserved for the
-future study-sheet stage.
+model, while correction may use its low-cost sibling. The study-sheet stage now uses the selected
+host session default model and is delivered in v0.5.0.
 
 ## Step 1 — acceptance criteria
 1. `fetch_video.py <url>` downloads one video (playlist and live refused; exit codes 0/1/2/3) and

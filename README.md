@@ -76,6 +76,10 @@ AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALITY=local`) with a base URL
 needs no API key. Declaring local is a trust statement: a localhost proxy may still forward data
 online. Use `--no-correct` or omit the API key to keep correction fully offline.
 
+Study-sheet writing can share bundle text, metadata, OCR, and selected chapter frame images with a
+remote host model. It does not send the raw video or audio. Local media requires consent during
+preparation before the host reads or writes the sheet; fetched URLs do not require that consent.
+
 **About the Whisper model.** The transcript is produced by Whisper, OpenAI's open speech-recognition
 AI, run locally through `faster-whisper`. Its *model* is the trained-knowledge file the program needs:
 `setup_tools.py` downloads it once into the Hugging Face cache, after which transcription is offline
@@ -94,6 +98,8 @@ python video-analysis/scripts/setup_tools.py        # installs tools and warms W
 python video-analysis/scripts/setup_tools.py --check # runs only the offline self-test
 python video-analysis/scripts/selftest.py           # offline checks on a synthetic video
 ```
+
+`setup_tools.py` also installs `python-docx` for editable Word study sheets.
 
 ## Self-test
 
@@ -207,9 +213,44 @@ Temporary and self-test work goes in the installed skill's `video-analysis/_temp
 Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
 Analysis outputs stay in `<video>.analysis/` next to the video.
 
+## Editable study sheet
+
+After `analyze_video.py` produces `bundle.json`, prepare a writer brief, let the current host session
+write `sheet.json`, then render an editable Word document:
+
+```powershell
+python video-analysis/scripts/prepare_sheet.py "<video>" --host codex --language en
+python video-analysis/scripts/render_sheet.py "<video>"
+python video-analysis/scripts/render_sheet.py "<video>" --template "<template.docx>"
+```
+
+The agent writing `sheet.json` uses the current session's default model and is never delegated. It
+views the selected chapter frames, chooses the most telling frame per chapter, and writes
+evidence-faithful `ON SCREEN`, `SAID`, and `INFERENCE` content. Schema v1 includes required `labels`
+for source, introduction, summary, glossary, and figure in the sheet language. With `--language auto`,
+the speech language in `bundle.json` is used when present; otherwise the brief instructs the writer
+to use the speech language. For local media, preparation exit 4 means ask for consent and rerun with
+`--allow-remote-ai` only after approval.
+
+| Output | Purpose |
+|---|---|
+| `sheet.brief.md` | Reusable writer contract, resolved language, provenance, and exact schema. |
+| `sheet.json` | Host-authored sheet content validated against bundle and writer provenance. |
+| `<video stem>.docx` | Editable study sheet rendered with built-in formatting or a Word template. |
+| `manifest.json` | Preparation consent and render resume identities. |
+
+The renderer accepts `.docx` and `.dotx` templates. YouTube and Vimeo links seek to chapter or figure
+timestamps; unsupported sources retain visible timestamps without links. Exit 2 means invalid or
+missing input, exit 3 means invalid sheet or a state/output conflict, and exit 4 means preparation
+consent is required or render preparation is missing. Existing DOCX files are never overwritten;
+rename or move one before rerendering after a conflict. Preparation, host writing, and rendering are
+separate from `analyze_video.py`, which stops at `bundle.json`.
+
 ## Status
 
-v0.4.0 — see [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
+v0.5.0 — measured checks: `DEFAULT_CHECKS=114` (114 passed, 0 failed); `FULL_CHECKS=116`
+(116 passed, 0 failed). See
+[RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License
 

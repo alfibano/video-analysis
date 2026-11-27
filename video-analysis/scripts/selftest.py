@@ -670,12 +670,26 @@ def _as_dotx(source: Path, target: Path) -> None:
 def check_default_docx_render() -> bool:
     from render_sheet import FIXED_CORE_TIME, render_document
     from docx import Document
+    from docx.oxml.ns import qn
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
         doc = render_document(sheet, analysis_dir=analysis)
         paragraphs = [(p.style.name, p.text) for p in doc.paragraphs]
         text = [value for _, value in paragraphs]
-        return (text[0] == "Lesson" and any("Origine: Sample" in value for value in text) and "Présentation" in text
+        hyperlinks = doc.part.element.xpath(".//w:hyperlink")
+        has_hyperlink_style = "Hyperlink" in [style.name for style in doc.styles]
+        visible_hyperlinks = bool(hyperlinks)
+        if not has_hyperlink_style:
+            for link in hyperlinks:
+                for run in link.xpath(".//w:r"):
+                    props = run.find(qn("w:rPr"))
+                    color = props.find(qn("w:color")) if props is not None else None
+                    underline = props.find(qn("w:u")) if props is not None else None
+                    if (color is None or color.get(qn("w:val")) != "0563C1"
+                            or underline is None or underline.get(qn("w:val")) != "single"):
+                        visible_hyperlinks = False
+        return (visible_hyperlinks and not has_hyperlink_style
+            and text[0] == "Lesson" and any("Origine: Sample" in value for value in text) and "Présentation" in text
             and "Résumé" in text and "Lexique" in text and "Image à 00:00:02" in text
             and any(style == "List Bullet" and value == "Point one" for style, value in paragraphs)
             and len(doc.inline_shapes) == 1 and doc.core_properties.title == "Lesson"
@@ -2195,33 +2209,24 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_v040_documentation_and_release_contract() -> bool:
+def check_v050_documentation_and_release_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
     docs = readme + skill
-    hosts = all(term in readme and term in skill for term in ("claude-code", "codex", "openclaw"))
-    routing = all(term in docs for term in ("--host", "VIDEO_ANALYSIS_HOST", "host default",
-                                             "low-cost", "reason", "fallback", "endpoint identity"))
-    locality = all(term in docs for term in ("VIDEO_ANALYSIS_HOST_AI", "VIDEO_ANALYSIS_AI_LOCALITY",
-                                              "loopback", "provider evidence"))
-    locality_scope = ("step-4 declaration" in docs and "host provider" in docs
-                      and "does not make correction local" in docs)
-    disclosure = all(term in skill.lower() for term in ("before correction", "before step-4 writing",
-                                                         "session default", "stderr", "one-time"))
-    openclaw = all(term in docs + release for term in ("infer model run", "--prompt-stdin",
-                                                        "UNVERIFIED-LIVE"))
-    migration = all(term in docs + release for term in ("exit 3", "v0.3.0", "rerun"))
-    release_contract = all(term in release for term in ("v0.4.0", "2026-11-27", "88/88", "90/90",
-                                                         "fake runner"))
-    historical = release.split("## v0.3.0", 1)[-1].split("## v0.2.1", 1)[0]
-    historical_models = all(term in historical for term in ("2026-11-27", "Haiku", "Luna",
-                                                              "Sonnet", "Sol"))
-    return (hosts and routing and locality and locality_scope and disclosure and openclaw and migration
-            and release_contract and historical_models and "session default" in platform.lower()
-            and "low-cost sibling" in platform
-            and all(term in release for term in ("v0.3.0", "2026-11-27", "transcript correction")))
+    commands = all(name in docs for name in ("prepare_sheet.py", "render_sheet.py"))
+    outputs = all(name in docs for name in ("sheet.brief.md", "sheet.json", "<video stem>.docx"))
+    sheet_flow = all(term in skill for term in ("current session default model", "never delegated",
+        "most telling frame", "ON SCREEN", "SAID", "INFERENCE", "exit 3", "exit 4"))
+    labels_language = all(term in docs for term in ("labels", "sheet language", "speech language"))
+    release_contract = "v0.5.0" in release and "2026-11-27" in release
+    platform_status = "steps 1–4 implemented" in platform or "steps 1-4 implemented" in platform
+    pipeline_boundary = "stops at `bundle.json`" in docs or "stops at bundle.json" in docs
+    count_contract = all(term in readme + release + (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
+                         for term in ("DEFAULT_CHECKS=114", "FULL_CHECKS=116", "116 passed"))
+    return all((commands, outputs, sheet_flow, labels_language, release_contract,
+                platform_status, pipeline_boundary, count_contract))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -2763,8 +2768,9 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["v0.4.0 documentation and release contract"] = run_check(
-            "v0.4.0 documentation and release contract", check_v040_documentation_and_release_contract)
+        checks["v0.5.0 documentation release and measured-count contract"] = run_check(
+            "v0.5.0 documentation release and measured-count contract",
+            check_v050_documentation_and_release_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(

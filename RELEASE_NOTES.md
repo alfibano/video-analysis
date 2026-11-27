@@ -1,5 +1,33 @@
 # Release notes — video-analysis
 
+## v0.5.0 — 2026-11-27 — editable DOCX study sheets
+
+### Added
+- `prepare_sheet.py` resolves the host session default model, enforces local-media remote-AI consent,
+  and writes a reusable `sheet.brief.md` with schema-v1 instructions. The host agent writes
+  `sheet.json`; `render_sheet.py` validates it and creates an editable `.docx`.
+- Schema-v1 sheet labels are required and supplied in the sheet language. Auto language resolves
+  from `bundle.json` speech language when present, otherwise the brief tells the writer to use the
+  speech language.
+- Built-in rendering and user `.docx` / `.dotx` templates preserve editable Word content. Supported
+  YouTube and Vimeo sources receive timestamp seek links.
+- Manifest resume identity and no-overwrite behavior protect existing DOCX files. Added
+  `python-docx` as a rendering dependency and 27 offline sheet checks.
+
+### Changed
+- Study-sheet writing may share bundle text, metadata, OCR, and selected frame images with a remote
+  host; raw video and audio are not sent. Local media requires consent during preparation.
+- `analyze_video.py` still stops at `bundle.json`; preparation, host writing, and DOCX rendering are
+  separate stages. The host writer is the current session default model and is never delegated.
+
+### Measured
+- Default self-test: `DEFAULT_CHECKS=114` (114 passed, 0 failed).
+- `--full`: `FULL_CHECKS=116` (116 passed, 0 failed).
+
+### Deferred
+- Standalone provider adapters, a separate UI, PDF/PPTX and other export formats, and blind
+  writer-model benchmarks remain future work.
+
 ## v0.4.0 — 2026-11-27 — host-aware model routing
 
 ### Added

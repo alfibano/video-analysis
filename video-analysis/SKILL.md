@@ -25,6 +25,10 @@ explicitly declared local AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALI
 base URL is not asked and needs no API key. Declaring local is a trust statement: a localhost proxy
 may still forward data online. Use `--no-correct` to keep correction fully offline.
 
+Writing a study sheet can send the bundle's text, metadata, OCR, and selected frame images to a
+remote host model. It does not send the raw video or audio. Local media requires consent during
+`prepare_sheet.py` before the host reads or writes sheet content; a fetched URL does not.
+
 ## Transcript correction providers
 
 Select `--provider auto|claude-code|codex|openclaw|openai|local` (or
@@ -76,12 +80,11 @@ reach its host service.
 
 ## Where things go — the owner's hard rule
 
-All extracted material goes into **one working folder next to the video**:
+All extracted material and study-sheet files go into **one working folder next to the video**:
 `<folder of the video>\<video name>.analysis\` — never into a scratchpad, a temp dir or the project.
 The owner deletes it when the work on that video is done, to reclaim disk space.
 **Never delete it yourself.** If asked to clean up, use the `trash` skill on exactly that folder
-(Recycle Bin, never `rm`). Your *written analysis* (the deliverable) belongs where the project wants
-it, not inside the `.analysis` folder, so that trashing the folder loses nothing of value.
+(Recycle Bin, never `rm`). The study-sheet brief, JSON, and DOCX stay inside this folder.
 
 Temporary and self-test work goes in the installed skill's `video-analysis/_temp` folder. The whole
 `_temp` folder can be sent to the Recycle Bin when no run is in progress; scripts never delete it.
@@ -107,7 +110,7 @@ python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # offlin
 python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
 ```
 Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
-`faster-whisper`, `rapidocr`, `yt-dlp[default]`, `openai`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
+`faster-whisper`, `rapidocr`, `yt-dlp[default]`, `openai`, `python-docx`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
 system ffmpeg is found; then caches the Whisper `small` model and warms OCR once so its model downloads
 during setup. Tool resolution: environment override
 (`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
@@ -129,6 +132,32 @@ Optional real URL check (downloads and extracts a video):
 `python ~/.claude/skills/video-analysis/scripts/selftest.py --network "<URL>"`
 
 ## Secondary tools
+
+Study sheets use a separate host-writing turn after `analyze_video.py` has finished its bundle:
+
+```bash
+python ~/.claude/skills/video-analysis/scripts/prepare_sheet.py "<video path>"
+python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>"
+python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>" --template "<template.docx>"
+```
+
+The preparation command prints the selected host session default model. If it exits 4, ask for
+consent and rerun with `--allow-remote-ai` only after approval. Read `sheet.brief.md`, `bundle.json`,
+and the selected chapter frame images. The agent in the current session writes `sheet.json` itself
+with the current session default model; sheet writing is never delegated. After viewing the frames, choose the
+most telling frame per chapter. Write readable study prose faithful to the evidence: never present
+an INFERENCE as something SAID or shown ON SCREEN, but do not tag sentences with these words. Schema v1 requires non-empty `labels` for `source`,
+`introduction`, `summary`, `glossary`, and `figure`, written in the sheet language. With
+`--language auto`, use `speech.language` from the bundle when present; otherwise write in the speech
+language. Run `render_sheet.py` and relay the resulting DOCX path.
+
+Preparation/render exits: 2 means invalid or missing input; 3 means invalid sheet or a state/output
+conflict; 4 means preparation consent is required (prepare) or successful preparation is missing
+(render). For exit 3, explain the conflict; if a DOCX already exists, ask the user to rename or move
+it before rerendering. A `.docx` or `.dotx` template is supported. Reruns preserve an existing DOCX.
+
+`analyze_video.py` stops at `bundle.json`; preparation, the host writing turn, and DOCX rendering
+are separate commands.
 
 For an online video, fetch it first. Playlists and live/upcoming streams are refused before any
 download. The video remains intact; SponsorBlock segments are marked in `sponsorblock.json` and
@@ -206,13 +235,11 @@ e. Write the analysis (step 4).
 
 ### Step-4 host locality contract
 
-Use the session default model to write step 4; correction may use its same-family low-cost sibling.
-Resolve locality from the selected host provider's positive locality evidence or an explicit
-`--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration. `VIDEO_ANALYSIS_HOST_AI=local|remote`
+The study-sheet agent procedure above owns the step-4 writing turn. Use the selected host session
+default model, and resolve locality from the selected host provider's positive locality evidence or
+an explicit `--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration. `VIDEO_ANALYSIS_HOST_AI=local|remote`
 remains a backward-compatible step-4 declaration and does not make correction local. A loopback URL
-alone is remote. Before step-4 writing, disclose the host, model, role `default`, reason, and locality
-to the user. For local media and a remote model, ask for consent. A URL video or explicitly local
-model needs no confirmation.
+alone is remote.
 
 ## 4. Report — keep three things apart
 
