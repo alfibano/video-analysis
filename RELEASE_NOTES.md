@@ -1,5 +1,21 @@
 # Release notes — video-analysis
 
+## v0.6.3 — 2026-11-27 — callouts as rounded boxes with image icons
+
+### Changed
+- Study-sheet callouts now render as editable rounded boxes with kind-colored outlines and fills.
+  Their correction, complement, and question icons are antialiased PNGs generated in memory, and
+  source links remain clickable inside the text boxes. Spacing separates callouts from tables and
+  neighboring content.
+
+### Fixed
+- Fifteen sheet self-test checks read `VIDEO_ANALYSIS_TEMP_DIR` directly and failed with `KeyError`
+  when the suite ran with its default temp folder; they now use the app temp root.
+
+### Measured
+- Default self-test: `DEFAULT_CHECKS=132` (132 passed, 0 failed); `--full`: `FULL_CHECKS=134`
+  (134 passed, 0 failed), both run without any temp-folder override.
+
 ## v0.6.2 — 2026-11-27 — uniform text size
 
 ### Fixed

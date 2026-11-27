@@ -28,6 +28,12 @@ LAST_EXTRACT_OUTPUT = ""
 CHECK_OUTPUTS: dict[str, str] = {}
 
 
+
+def _temp_root() -> Path:
+    """App temp root (VIDEO_ANALYSIS_TEMP_DIR or the installed video-analysis/_temp)."""
+    from tools import app_temp_dir
+    return app_temp_dir()
+
 def check_tool_resolution() -> bool:
     try:
         from tools import resolve_ffmpeg
@@ -630,7 +636,7 @@ def _prepare_case(root: Path, *, locality: str = "remote", kind: str = "local",
 
 def check_sheet_schema_valid() -> bool:
     from sheet_schema import format_hhmmss, validate_sheet
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         accepted = validate_sheet(sheet, analysis_dir=analysis,
             expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer,
@@ -641,7 +647,7 @@ def check_sheet_schema_valid() -> bool:
 
 
 def check_sheet_schema_required_unknown_labels() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         missing = dict(valid); del missing["title"]
         unknown = dict(valid); unknown["extra"] = True
@@ -657,7 +663,7 @@ def check_sheet_schema_required_unknown_labels() -> bool:
 
 
 def check_sheet_schema_types_text() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["schema_version"] = True
         empty = json.loads(json.dumps(valid)); empty["chapters"][0]["blocks"][0]["text"] = "  "
@@ -668,28 +674,28 @@ def check_sheet_schema_types_text() -> bool:
 
 
 def check_sheet_schema_intervals() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["start"] = 5
         return _sheet_error(wrong, analysis, writer, "chapters[0]", "must satisfy 0 <= start < end")
 
 
 def check_sheet_schema_ordering() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["chapters"].append({**wrong["chapters"][0], "start": 4, "end": 6})
         return _sheet_error(wrong, analysis, writer, "chapters[1]", "must be ordered and non-overlapping")
 
 
 def check_sheet_schema_frame_time() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["time"] = 6
         return _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.time", "must be within chapter interval")
 
 
 def check_sheet_schema_frame_paths() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         paths = ("/tmp/frame.jpg", "C:/frame.jpg", "../frame.jpg", "frames\\frame.jpg", "frames/./frame.jpg")
         for path in paths:
@@ -708,21 +714,21 @@ def check_sheet_schema_frame_paths() -> bool:
 
 
 def check_sheet_schema_missing_frame() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["blocks"][0]["frame"]["file"] = "frames/missing.jpg"
         return _sheet_error(wrong, analysis, writer, "chapters[0].blocks[0].frame.file", "file does not exist")
 
 
 def check_sheet_schema_digest() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         return _sheet_error(valid, analysis, writer, "source.bundle_sha256",
                             "does not match current bundle.json", "0" * 64)
 
 
 def check_sheet_schema_writer() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, valid, writer = _sheet_fixture(Path(temp))
         return _sheet_error(valid, analysis, {**writer, "model": "other"}, "writer",
                             "does not match sheet preparation")
@@ -730,7 +736,7 @@ def check_sheet_schema_writer() -> bool:
 
 def check_sheet_v2_duration_summary() -> bool:
     from sheet_schema import SheetValidationError, validate_sheet
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         try:
             validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"],
@@ -742,7 +748,7 @@ def check_sheet_v2_duration_summary() -> bool:
 
 def check_sheet_v2_blocks_references() -> bool:
     from sheet_schema import SheetValidationError, validate_sheet
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         sheet["references"] = [{"id": 1, "url": "https://example.org/ref", "title": "Reference", "origin": "source"}]
         sheet["chapters"][0]["callouts"] = [{"kind": "correction", "text": "A correction", "sources": [1]}]
@@ -757,7 +763,7 @@ def check_sheet_v2_blocks_references() -> bool:
 
 def check_sheet_v2_context_budget() -> bool:
     from sheet_schema import SheetValidationError, validate_sheet
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         sheet["context"]["author_email"] = {"value": "author@example.org", "evidence": "Published slide"}
         sheet["context"]["series"] = {"theme": "Series", "first_video_url": "javascript:alert(1)"}
@@ -796,7 +802,7 @@ def check_sheet_v2_context_budget() -> bool:
 
 def check_renderer_v1_refusal() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, sheet = _render_fixture(Path(temp))
         sheet["schema_version"] = 1
         (analysis / "sheet.json").write_text(json.dumps(sheet), encoding="utf-8")
@@ -808,7 +814,7 @@ def check_renderer_v1_refusal() -> bool:
 
 def check_render_v2_identity() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
         if run_render(video) != 0: return False
         manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
@@ -818,25 +824,101 @@ def check_render_v2_identity() -> bool:
 
 def check_docx_v2_layout() -> bool:
     from render_sheet import render_document
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    from PIL import Image
+    from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from io import BytesIO
+    from lxml import etree
+    import shutil
+    import subprocess
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
-        sheet["references"] = [{"id": 1, "url": "https://example.org/ref", "title": "Ref", "origin": "source"}]
-        sheet["chapters"][0]["callouts"] = [{"kind": "complement", "text": "Extra detail", "sources": [1]}]
+        sheet["references"] = [{"id": index, "url": f"https://example.org/{kind}", "title": kind, "origin": "source"}
+                               for index, kind in enumerate(("correction", "complement", "question"), 1)]
+        sheet["chapters"][0]["callouts"] = [
+            {"kind": kind, "text": f"Extra {kind} detail", "sources": [source_id]}
+            for kind, source_id in (("correction", 1), ("complement", 2), ("question", 3), ("complement", 2))]
         doc = render_document(sheet, analysis_dir=analysis)
         xml = doc._element.xml
-        targets = [rel.target_ref for rel in doc.part.rels.values() if rel.reltype.endswith("/hyperlink")]
-        return ("E3F0FB" in xml and 'w:val="single"' in xml and "w:insideV" in xml and 'w:insideH w:val="nil"' in xml
-                and "https://example.org/ref" in targets and "ℹ" in xml
-                and len(doc.inline_shapes) == 1 and doc.inline_shapes[0].width < 6 * 914400 * .38
+        colors = {"correction": "FDE2E1", "complement": "E3F0FB", "question": "FFF4D6"}
+        line_colors = {"correction": "D93025", "complement": "1A73E8", "question": "F29900"}
+        kinds = ("correction", "complement", "question", "complement")
+        drawings = doc._element.body.xpath(".//wp:inline")
+        shapes = doc._element.body.xpath(".//wps:wsp")
+        callout_paragraphs = [p for p in doc._element.body.xpath("./w:p") if p.xpath(".//wps:wsp")]
+        icon_images = []
+        for relation in doc.part.rels.values():
+            if relation.reltype != RT.IMAGE:
+                continue
+            try:
+                icon = Image.open(BytesIO(relation.target_part.blob))
+            except Exception:
+                continue
+            if icon.size == (96, 96) and icon.mode == "RGBA":
+                icon_images.append(relation.target_part.blob)
+        source_links = {rel.target_ref for rel in doc.part.rels.values()
+                        if rel.reltype == RT.HYPERLINK and rel.is_external}
+        body_elements = list(doc._element.body)
+        detached = all(body_elements.index(paragraph) > 0
+                       and body_elements[body_elements.index(paragraph) - 1].tag == qn("w:p")
+                       and body_elements.index(paragraph) + 1 < len(body_elements)
+                       and body_elements[body_elements.index(paragraph) + 1].tag == qn("w:p")
+                       for paragraph in callout_paragraphs)
+        table_spacers = all(index + 1 < len(body_elements)
+                            and body_elements[index + 1].tag == qn("w:p")
+                            for index, element in enumerate(body_elements) if element.tag == qn("w:tbl"))
+        shape_xml = [etree.tostring(shape, encoding="unicode") for shape in shapes]
+        callout_xml = [etree.tostring(paragraph, encoding="unicode") for paragraph in callout_paragraphs]
+        serialized = etree.tostring(doc._element, encoding="unicode")
+        shape_structure = all(
+            shape.xpath("./wps:txbx/w:txbxContent/w:p[1]/w:r/w:drawing", namespaces={
+                "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+            and shape.xpath("./wps:txbx/w:txbxContent/w:p[1]/w:r/w:rPr/w:b", namespaces={
+                "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+            and shape.xpath("./wps:bodyPr/a:spAutoFit", namespaces={
+                "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main"})
+            for shape in shapes)
+        shape_colors = all(
+            shape.xpath("./wps:spPr/a:solidFill/a:srgbClr/@val", namespaces={
+                "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}) == [colors[kind]]
+            and shape.xpath("./wps:spPr/a:ln/a:solidFill/a:srgbClr/@val", namespaces={
+                "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}) == [line_colors[kind]]
+            for shape, kind in zip(shapes, kinds))
+        roundtrip = Path(temp) / "roundtrip.docx"
+        doc.save(roundtrip)
+        from docx import Document
+        reopened = Document(roundtrip)
+        soffice = shutil.which("soffice")
+        converted = True
+        if soffice:
+            conversion = subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", temp,
+                                         str(roundtrip)], capture_output=True, text=True, timeout=60, check=False)
+            converted = conversion.returncode == 0 and (Path(temp) / "roundtrip.pdf").is_file()
+        return (all('prst="roundRect"' in shape for shape in shape_xml)
+                and shape_colors
+                and len(shapes) == 4 and len(callout_paragraphs) == 4
+                and shape_structure and len(drawings) >= 9 and len(icon_images) == 3 and detached and table_spacers
+                and set(f"https://example.org/{kind}" for kind in colors) <= source_links
+                and all('Requires="wps"' in text and "w:hyperlink" in text for text in callout_xml)
+                and all(f"Extra {kind} detail" in text for kind, text in zip(kinds, callout_xml))
+                and all(token in serialized for token in colors.values())
+                and "w:insideV" in xml and 'w:insideH w:val="nil"' in xml
+                and len(doc.inline_shapes) == 5 and doc.inline_shapes[0].width < 6 * 914400 * .38
                 and abs(doc.inline_shapes[0].width / doc.inline_shapes[0].height - 12 / 8) < 0.01
                 and all(run.font.size is None for table in doc.tables for row in table.rows
-                        for cell in row.cells for para in cell.paragraphs for run in para.runs))
+                        for cell in row.cells for para in cell.paragraphs for run in para.runs)
+                and len(reopened.inline_shapes) == 5 and converted)
 
 
 def check_prepare_v2_identity() -> bool:
     from prepare_sheet import run_prepare
     import sheet_cost
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
         if run_prepare(video, request, deps) != 0: return False
         manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
@@ -863,7 +945,7 @@ def check_prepare_v2_identity() -> bool:
 
 
 def check_sheet_model_facts_rejected() -> bool:
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         analysis, _, sheet, writer = _sheet_fixture(Path(temp))
         sheet["facts"] = {"view_count": 999}
         sheet["accounting"] = {"usd": {"total": 0}}
@@ -885,7 +967,7 @@ def check_sheet_seek_links() -> bool:
 
 def check_sheet_prepare_default_provenance() -> bool:
     from prepare_sheet import run_prepare
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp))
         request = replace(request, allow_remote_ai=True)
         output = io.StringIO()
@@ -901,7 +983,7 @@ def check_sheet_prepare_default_provenance() -> bool:
 
 def check_sheet_prepare_consent_matrix() -> bool:
     from prepare_sheet import run_prepare
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         root = Path(temp)
         video, analysis, (request, deps) = _prepare_case(root / "denied")
         before = {p.name: p.read_bytes() for p in analysis.iterdir()}
@@ -927,7 +1009,7 @@ def check_sheet_prepare_consent_matrix() -> bool:
 def check_sheet_prepare_brief_contract() -> bool:
     from prepare_sheet import run_prepare
     from sheet_schema import SHEET_JSON_SCHEMA_V2
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
         if run_prepare(video, request, deps) != 0:
             return False
@@ -952,7 +1034,7 @@ def check_sheet_prepare_brief_contract() -> bool:
 
 def check_sheet_prepare_resume_conflicts() -> bool:
     from prepare_sheet import run_prepare
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
         if run_prepare(video, request, deps) != 0:
             return False
@@ -1030,7 +1112,7 @@ def check_default_docx_render() -> bool:
     from render_sheet import FIXED_CORE_TIME, render_document
     from docx import Document
     from docx.oxml.ns import qn
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
         sheet["labels"]["prices_as_of"] = "prix en date du"
         sheet["labels"]["facts"] = {key: key.replace("_", " ").title()
@@ -1095,7 +1177,7 @@ def check_default_docx_render() -> bool:
 def check_sheet_source_url_security() -> bool:
     from render_sheet import render_document, run_render
     from sheet_schema import SheetValidationError, validate_sheet
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
         supported = render_document(sheet, analysis_dir=analysis)
         supported_targets = [rel.target_ref for rel in supported.part.rels.values() if rel.is_external]
@@ -1140,7 +1222,7 @@ def check_sheet_source_url_security() -> bool:
 
 def check_docx_template_preservation() -> bool:
     from render_sheet import render_document
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         root = Path(temp); _, analysis, sheet = _render_fixture(root)
         template = root / "styled.docx"; _docx_template(template)
         doc = render_document(sheet, analysis_dir=analysis, template=template)
@@ -1153,7 +1235,7 @@ def check_docx_template_preservation() -> bool:
 def check_dotx_template() -> bool:
     from render_sheet import run_render
     from docx import Document
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         root = Path(temp); video, analysis, _ = _render_fixture(root)
         docx = root / "template.docx"; dotx = root / "template.dotx"
         _docx_template(docx); _as_dotx(docx, dotx); original = dotx.read_bytes()
@@ -1178,7 +1260,7 @@ def check_dotx_template() -> bool:
 def check_missing_styles_fallback() -> bool:
     from render_sheet import render_document
     from docx import Document
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         root = Path(temp); _, analysis, sheet = _render_fixture(root)
         template = root / "sparse.docx"; _docx_template(template)
         doc = Document(template)
@@ -1221,7 +1303,7 @@ def check_missing_styles_fallback() -> bool:
 def check_render_resume_preserves_docx() -> bool:
     from render_sheet import run_render
     from docx import Document
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
         if run_render(video) != 0:
             return False
@@ -1232,7 +1314,7 @@ def check_render_resume_preserves_docx() -> bool:
 
 def check_changed_sheet_refuses_docx() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
         if run_render(video) != 0:
             return False
@@ -1244,7 +1326,7 @@ def check_changed_sheet_refuses_docx() -> bool:
 
 def check_untracked_docx_refused() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp)); output = analysis / "sample.docx"
         output.write_bytes(b"user data")
         return run_render(video) == 3 and output.read_bytes() == b"user data"
@@ -1252,14 +1334,14 @@ def check_untracked_docx_refused() -> bool:
 
 def check_render_requires_preparation() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, _, _ = _render_fixture(Path(temp), prepared=False)
         return run_render(video) == 4
 
 
 def check_render_rejects_changed_bundle() -> bool:
     from render_sheet import run_render
-    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         video, analysis, _ = _render_fixture(Path(temp))
         bundle = analysis / "bundle.json"
         bundle.write_text('{"source":{"url":"https://youtu.be/abc"},"changed":true}', encoding="utf-8")

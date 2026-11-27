@@ -140,7 +140,136 @@ def _cell_borderless(table) -> None:
     table._tbl.tblPr.append(borders)
 
 
-def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any], analysis_dir: Path) -> None:
+_CALLOUT_COLORS = {
+    "correction": ("FDE2E1", "D93025"),
+    "complement": ("E3F0FB", "1A73E8"),
+    "question": ("FFF4D6", "F29900"),
+}
+
+
+def _callout_icon(kind: str) -> bytes:
+    from PIL import Image, ImageDraw, ImageFont
+    scale = 4
+    image = Image.new("RGBA", (96 * scale, 96 * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    color = "#" + _CALLOUT_COLORS[kind][1]
+    draw.ellipse((2 * scale, 2 * scale, 94 * scale, 94 * scale), fill=color)
+    if kind == "correction":
+        draw.line((29 * scale, 29 * scale, 67 * scale, 67 * scale), fill="white", width=10 * scale)
+        draw.line((67 * scale, 29 * scale, 29 * scale, 67 * scale), fill="white", width=10 * scale)
+    elif kind == "complement":
+        draw.rounded_rectangle((43 * scale, 36 * scale, 53 * scale, 68 * scale), radius=4 * scale, fill="white")
+        draw.ellipse((43 * scale, 22 * scale, 53 * scale, 32 * scale), fill="white")
+    else:
+        font = ImageFont.load_default(size=68 * scale)
+        bounds = draw.textbbox((0, 0), "?", font=font)
+        x = (96 * scale - (bounds[2] - bounds[0])) / 2 - bounds[0]
+        y = (96 * scale - (bounds[3] - bounds[1])) / 2 - bounds[1] - 2 * scale
+        draw.text((x, y), "?", fill="white", font=font)
+    image = image.resize((96, 96), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _spacer(document) -> None:
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.space_before = 0
+    paragraph.paragraph_format.space_after = 4
+    paragraph.paragraph_format.line_spacing = 1
+
+
+def _callout_paragraph(document, sheet: Mapping[str, Any], callout: Mapping[str, Any],
+                       width: int, icons: dict[str, tuple[bytes, Any]]):
+    from copy import deepcopy
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import nsmap, qn
+    from docx.shared import Inches
+    from docx.text.paragraph import Paragraph
+
+    nsmap.setdefault("wps", "http://schemas.microsoft.com/office/word/2010/wordprocessingShape")
+    nsmap.setdefault("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
+    kind = callout["kind"]
+    icon_para = OxmlElement("w:p")
+    icon_wrapper = Paragraph(icon_para, document._body)
+    icon_bytes, icon_picture = icons[kind]
+    if icon_picture is None:
+        icon_wrapper.add_run().add_picture(io.BytesIO(icon_bytes), height=Inches(.22))
+        icon_picture = deepcopy(icon_para[0][0])
+        icons[kind] = (icon_bytes, icon_picture)
+    else:
+        icon_run = OxmlElement("w:r")
+        icon_picture = deepcopy(icon_picture)
+        doc_pr = icon_picture.find(".//" + qn("wp:docPr"))
+        doc_pr.set("id", str(len(document._element.body.xpath(".//wp:docPr")) + 1))
+        icon_run.append(icon_picture)
+        icon_para.append(icon_run)
+
+    paragraph = OxmlElement("w:p")
+    first = OxmlElement("w:p")
+    first.append(icon_para[0])
+    from docx.text.paragraph import Paragraph as DocxParagraph
+    first_wrapper = DocxParagraph(first, document._body)
+    label = first_wrapper.add_run(" " + sheet["labels"][kind] + ":")
+    label.bold = True
+    text_p = OxmlElement("w:p")
+    text_wrapper = DocxParagraph(text_p, document._body)
+    text_wrapper.add_run(callout["text"])
+    refs = {entry["id"]: entry for entry in sheet["references"]}
+    for source_id in callout["sources"]:
+        text_wrapper.add_run(" (" + sheet["labels"]["source"] + " : ")
+        _hyperlink(text_wrapper, str(source_id), refs[source_id]["url"])
+        text_wrapper.add_run(")")
+
+    drawing = OxmlElement("wp:inline")
+    drawing.set("distT", "0"); drawing.set("distB", "0")
+    drawing.set("distL", "0"); drawing.set("distR", "0")
+    extent = OxmlElement("wp:extent"); extent.set("cx", str(width)); extent.set("cy", str(int(Inches(.38))))
+    drawing.append(extent)
+    doc_pr = OxmlElement("wp:docPr")
+    doc_pr.set("id", str(len(document._element.body.xpath(".//wp:docPr")) + 1))
+    doc_pr.set("name", "Callout")
+    drawing.append(doc_pr)
+    frame_pr = OxmlElement("wp:cNvGraphicFramePr")
+    frame_locks = OxmlElement("a:graphicFrameLocks"); frame_locks.set(qn("a:noChangeAspect"), "1")
+    frame_pr.append(frame_locks); drawing.append(frame_pr)
+    graphic = OxmlElement("a:graphic")
+    graphic_data = OxmlElement("a:graphicData")
+    graphic_data.set("uri", "http://schemas.microsoft.com/office/word/2010/wordprocessingShape")
+    shape = OxmlElement("wps:wsp")
+    nonvisual = OxmlElement("wps:cNvSpPr"); nonvisual.set("txBox", "1"); shape.append(nonvisual)
+    shape_props = OxmlElement("wps:spPr")
+    transform = OxmlElement("a:xfrm")
+    off = OxmlElement("a:off"); off.set("x", "0"); off.set("y", "0")
+    ext = OxmlElement("a:ext"); ext.set("cx", str(width)); ext.set("cy", str(int(Inches(.38))))
+    transform.extend((off, ext)); shape_props.append(transform)
+    geometry = OxmlElement("a:prstGeom"); geometry.set("prst", "roundRect")
+    adjustments = OxmlElement("a:avLst"); adjustment = OxmlElement("a:gd")
+    adjustment.set("name", "adj"); adjustment.set("fmla", "val 12000")
+    adjustments.append(adjustment); geometry.append(adjustments); shape_props.append(geometry)
+    fill_color, line_color = _CALLOUT_COLORS[kind]
+    fill = OxmlElement("a:solidFill"); fill_rgb = OxmlElement("a:srgbClr"); fill_rgb.set("val", fill_color)
+    fill.append(fill_rgb); shape_props.append(fill)
+    line = OxmlElement("a:ln"); line.set("w", "12700")
+    line_fill = OxmlElement("a:solidFill"); line_rgb = OxmlElement("a:srgbClr"); line_rgb.set("val", line_color)
+    line_fill.append(line_rgb); line.append(line_fill); shape_props.append(line)
+    shape.append(shape_props)
+    textbox = OxmlElement("wps:txbx")
+    content = OxmlElement("w:txbxContent"); content.extend((first, text_p)); textbox.append(content)
+    shape.append(textbox)
+    body_props = OxmlElement("wps:bodyPr")
+    body_props.set("wrap", "square"); body_props.set("lIns", "91440"); body_props.set("rIns", "91440")
+    body_props.set("tIns", "45720"); body_props.set("bIns", "45720")
+    body_props.append(OxmlElement("a:spAutoFit")); shape.append(body_props)
+    graphic_data.append(shape); graphic.append(graphic_data); drawing.append(graphic)
+    choice = OxmlElement("mc:Choice"); choice.set("Requires", "wps"); choice.append(drawing)
+    alternate = OxmlElement("mc:AlternateContent"); alternate.append(choice)
+    run = OxmlElement("w:r"); run.append(alternate); paragraph.append(run)
+    return paragraph
+
+
+def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any], analysis_dir: Path,
+                    available: int, icons: dict[str, bytes]) -> None:
     from docx.shared import Inches
     heading = _paragraph(document, style="Heading 1")
     _add_linked_time(heading, sheet, chapter["start"]); heading.add_run(" — " + chapter["title"])
@@ -163,19 +292,14 @@ def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, An
             str(analysis_dir / Path(*frame["file"].split("/"))), width=max(1, image_width - Inches(.18)))
         caption = table.cell(0, 1).add_paragraph(style=_style(document, "Caption"))
         caption.add_run(sheet["labels"]["figure"] + " "); _add_linked_time(caption, sheet, frame["time"])
+        _spacer(document)
     for callout in chapter["callouts"]:
-        table = document.add_table(rows=1, cols=1); table.autofit = False
-        cell = table.cell(0, 0); shade = {"correction": "FDE2E1", "complement": "E3F0FB", "question": "FFF4D6"}[callout["kind"]]
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), shade); cell._tc.get_or_add_tcPr().append(shd)
-        paragraph = cell.paragraphs[0]; icon = {"correction": "✖", "complement": "ℹ", "question": "?"}[callout["kind"]]
-        paragraph.add_run(icon)
-        paragraph.add_run(" " + sheet["labels"][callout["kind"]] + ": " + callout["text"])
-        refs = {entry["id"]: entry for entry in sheet["references"]}
-        for source_id in callout["sources"]:
-            paragraph.add_run(" (" + sheet["labels"]["source"] + " : ")
-            _hyperlink(paragraph, str(source_id), refs[source_id]["url"]); paragraph.add_run(")")
+        _spacer(document)
+        paragraph = _callout_paragraph(document, sheet, callout, available, icons)
+        body = document._element.body
+        section_properties = body.sectPr
+        body.insert(body.index(section_properties), paragraph) if section_properties is not None else body.append(paragraph)
+        _spacer(document)
 
 
 def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapping[str, Any] | None = None,
@@ -238,8 +362,12 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapp
     for paragraph in sheet["summary"]: _paragraph(document, paragraph)
     _paragraph(document, sheet["labels"]["chapters_rationale"], "Heading 2")
     rationale = _paragraph(document, sheet["chapter_rationale"]); [setattr(run, "italic", True) for run in rationale.runs]
+    icons: dict[str, tuple[bytes, Any]] = {}
     for chapter in sheet["chapters"]:
-        _render_chapter(document, sheet, chapter, analysis_dir)
+        for callout in chapter["callouts"]:
+            if callout["kind"] not in icons:
+                icons[callout["kind"]] = (_callout_icon(callout["kind"]), None)
+        _render_chapter(document, sheet, chapter, analysis_dir, available, icons)
     if sheet["glossary"]:
         _paragraph(document, sheet["labels"]["glossary"], "Heading 1")
         for item in sheet["glossary"]:
