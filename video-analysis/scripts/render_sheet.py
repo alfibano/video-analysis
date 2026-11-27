@@ -17,6 +17,8 @@ from typing import Any, Mapping
 from sheet_schema import SheetValidationError
 
 FIXED_CORE_TIME = datetime(2000, 1, 1, tzinfo=timezone.utc)
+# Bump whenever the DOCX produced from the same inputs changes, so existing unmodified sheets re-render.
+RENDER_LAYOUT_VERSION = "0.6.3"
 
 
 def _style(document, name: str):
@@ -201,11 +203,9 @@ def _callout_paragraph(document, sheet: Mapping[str, Any], callout: Mapping[str,
         icons[kind] = (icon_bytes, icon_picture)
     else:
         icon_run = OxmlElement("w:r")
-        icon_picture = deepcopy(icon_picture)
-        doc_pr = icon_picture.find(".//" + qn("wp:docPr"))
-        doc_pr.set("id", str(len(document._element.body.xpath(".//wp:docPr")) + 1))
-        icon_run.append(icon_picture)
+        icon_run.append(deepcopy(icon_picture))
         icon_para.append(icon_run)
+    icon_para[0].find(".//" + qn("wp:docPr")).set("id", str(_next_shape_id(document)))
 
     paragraph = OxmlElement("w:p")
     first = OxmlElement("w:p")
@@ -229,11 +229,11 @@ def _callout_paragraph(document, sheet: Mapping[str, Any], callout: Mapping[str,
     extent = OxmlElement("wp:extent"); extent.set("cx", str(width)); extent.set("cy", str(int(Inches(.38))))
     drawing.append(extent)
     doc_pr = OxmlElement("wp:docPr")
-    doc_pr.set("id", str(len(document._element.body.xpath(".//wp:docPr")) + 1))
+    doc_pr.set("id", str(_next_shape_id(document, first)))
     doc_pr.set("name", "Callout")
     drawing.append(doc_pr)
     frame_pr = OxmlElement("wp:cNvGraphicFramePr")
-    frame_locks = OxmlElement("a:graphicFrameLocks"); frame_locks.set(qn("a:noChangeAspect"), "1")
+    frame_locks = OxmlElement("a:graphicFrameLocks"); frame_locks.set("noChangeAspect", "1")
     frame_pr.append(frame_locks); drawing.append(frame_pr)
     graphic = OxmlElement("a:graphic")
     graphic_data = OxmlElement("a:graphicData")
@@ -264,11 +264,21 @@ def _callout_paragraph(document, sheet: Mapping[str, Any], callout: Mapping[str,
     body_props.set("tIns", "45720"); body_props.set("bIns", "45720")
     body_props.append(OxmlElement("a:spAutoFit")); shape.append(body_props)
     graphic_data.append(shape); graphic.append(graphic_data); drawing.append(graphic)
-    choice = OxmlElement("mc:Choice"); choice.set("Requires", "wps"); choice.append(drawing)
+    # Word only accepts a DrawingML inline wrapped in w:drawing; LibreOffice tolerates its absence.
+    drawing_wrapper = OxmlElement("w:drawing"); drawing_wrapper.append(drawing)
+    choice = OxmlElement("mc:Choice"); choice.set("Requires", "wps"); choice.append(drawing_wrapper)
     alternate = OxmlElement("mc:AlternateContent"); alternate.append(choice)
     run = OxmlElement("w:r"); run.append(alternate); paragraph.append(run)
     return paragraph
 
+
+
+def _next_shape_id(document, *detached) -> int:
+    """Next drawing id unique across the document and not-yet-attached elements (Word rejects duplicates)."""
+    from docx.oxml.ns import qn
+    ids = [int(value) for element in (document._element, *detached)
+           for node in element.iter(qn("wp:docPr")) if (value := node.get("id", "")).isdigit()]
+    return max(ids, default=0) + 1
 
 def _render_chapter(document, sheet: Mapping[str, Any], chapter: Mapping[str, Any], analysis_dir: Path,
                     available: int, icons: dict[str, bytes]) -> None:
@@ -482,7 +492,8 @@ def _prepared_sheet(video: Path, manifest_path: Path, bundle_path: Path, sheet_p
 def _render_params(sheet_path: Path, template: Path | None, facts_sha: str, accounting_sha: str, brief_sha: str) -> dict[str, Any]:
     return {"sheet_sha256": _digest(sheet_path),
             "template_sha256": _digest(template) if template else "builtin", "schema_version": 2,
-            "facts_sha256": facts_sha, "accounting_sha256": accounting_sha, "brief_sha256": brief_sha}
+            "facts_sha256": facts_sha, "accounting_sha256": accounting_sha, "brief_sha256": brief_sha,
+            "layout_version": RENDER_LAYOUT_VERSION}
 
 
 def _resume_decision(output_path: Path, output_name: str, manifest: Mapping[str, Any],

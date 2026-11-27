@@ -11,7 +11,13 @@
   bytes still match the recorded output. Edited or untracked DOCX files remain protected and must be
   renamed or moved before rendering again; replacement uses a same-folder temporary file.
 
+- The render identity includes a layout version, so a renderer fix re-renders existing unmodified
+  sheets instead of resuming the old DOCX.
+
 ### Fixed
+- Microsoft Word refused to open sheets with callouts (LibreOffice accepted them): the text box was not
+  wrapped in `w:drawing`, drawing ids repeated, and a frame-lock attribute was namespaced. Verified by
+  opening the live sheet in Word; the layout check now asserts all three.
 - Fifteen sheet self-test checks read `VIDEO_ANALYSIS_TEMP_DIR` directly and failed with `KeyError`
   when the suite ran with its default temp folder; they now use the app temp root.
 

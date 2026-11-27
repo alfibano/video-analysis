@@ -819,7 +819,9 @@ def check_render_v2_identity() -> bool:
         if run_render(video) != 0: return False
         manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
         params = manifest["params"]["sheet_render"]
-        return all(key in params for key in ("schema_version", "facts_sha256", "accounting_sha256", "brief_sha256")) and params["schema_version"] == 2
+        from render_sheet import RENDER_LAYOUT_VERSION
+        return (all(key in params for key in ("schema_version", "facts_sha256", "accounting_sha256", "brief_sha256"))
+                and params["schema_version"] == 2 and params.get("layout_version") == RENDER_LAYOUT_VERSION)
 
 
 def check_docx_v2_layout() -> bool:
@@ -829,8 +831,6 @@ def check_docx_v2_layout() -> bool:
     from docx.opc.constants import RELATIONSHIP_TYPE as RT
     from io import BytesIO
     from lxml import etree
-    import shutil
-    import subprocess
     with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
         _, analysis, sheet = _render_fixture(Path(temp))
         sheet["references"] = [{"id": index, "url": f"https://example.org/{kind}", "title": kind, "origin": "source"}
@@ -893,12 +893,13 @@ def check_docx_v2_layout() -> bool:
         doc.save(roundtrip)
         from docx import Document
         reopened = Document(roundtrip)
-        soffice = shutil.which("soffice")
-        converted = True
-        if soffice:
-            conversion = subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", temp,
-                                         str(roundtrip)], capture_output=True, text=True, timeout=60, check=False)
-            converted = conversion.returncode == 0 and (Path(temp) / "roundtrip.pdf").is_file()
+        # Word refuses a document whose DrawingML inline is not wrapped in w:drawing, whose drawing ids
+        # repeat, or whose graphicFrameLocks carries a namespaced attribute; LibreOffice accepts all three.
+        word_wrapped = all(inline.getparent().tag == qn("w:drawing")
+                           for inline in doc._element.body.iter(qn("wp:inline")))
+        drawing_ids = [node.get("id") for node in doc._element.body.iter(qn("wp:docPr"))]
+        word_openable = (word_wrapped and len(drawing_ids) == len(set(drawing_ids))
+                         and "a:noChangeAspect" not in serialized)
         return (all('prst="roundRect"' in shape for shape in shape_xml)
                 and shape_colors
                 and len(shapes) == 4 and len(callout_paragraphs) == 4
@@ -912,7 +913,7 @@ def check_docx_v2_layout() -> bool:
                 and abs(doc.inline_shapes[0].width / doc.inline_shapes[0].height - 12 / 8) < 0.01
                 and all(run.font.size is None for table in doc.tables for row in table.rows
                         for cell in row.cells for para in cell.paragraphs for run in para.runs)
-                and len(reopened.inline_shapes) == 5 and converted)
+                and len(reopened.inline_shapes) == 5 and word_openable)
 
 
 def check_prepare_v2_identity() -> bool:
