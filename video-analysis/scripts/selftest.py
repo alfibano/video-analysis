@@ -6,12 +6,16 @@ import ast
 import contextlib
 import io
 import json
+import hashlib
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 from typing import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -334,7 +338,7 @@ def check_network_fetch(url: str, folder: Path) -> bool:
 
 def check_script_help_contract() -> bool:
     scripts = ("extract_video.py", "fetch_video.py", "setup_tools.py", "selftest.py", "build_bundle.py",
-               "analyze_video.py")
+               "analyze_video.py", "prepare_sheet.py")
     for script in scripts:
         result = subprocess.run([sys.executable, str(HERE / script), "-h"],
                                 capture_output=True, text=True, check=False)
@@ -374,6 +378,235 @@ def check_script_help_contract() -> bool:
                 if not has_inline_help and not has_wrapped_help:
                     return False
     return True
+
+
+def _sheet_fixture(root: Path) -> tuple[Path, Path, dict, dict]:
+    analysis = root / "sample.analysis"
+    frames = analysis / "frames"
+    frames.mkdir(parents=True)
+    frame = frames / "frame.jpg"
+    frame.write_bytes(b"frame")
+    bundle = {"speech": {"language": "fr"}, "chapters": []}
+    (analysis / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+    digest = hashlib.sha256((analysis / "bundle.json").read_bytes()).hexdigest()
+    writer = {"host": "claude-code", "model": "claude-sonnet-test", "role": "default"}
+    sheet = {"schema_version": 1, "source": {"bundle_sha256": digest, "title": "Sample",
+             "url": "https://youtu.be/abc"}, "language": "fr", "title": "Lesson",
+             "introduction": "Intro", "summary": "Résumé", "labels": {"source": "Source",
+             "introduction": "Introduction", "summary": "Résumé", "glossary": "Glossaire",
+             "figure": "Figure à"}, "chapters": [{"title": "Chapter", "text": "Text",
+             "start": 1, "end": 5, "key_points": ["Point"],
+             "frame": {"file": "frames/frame.jpg", "time": 2}}], "glossary": [], "writer": writer}
+    manifest = {"schema_version": 2, "source": {"kind": "local"}, "params": {}, "stages": {}}
+    (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return analysis, frame, sheet, writer
+
+
+def _sheet_error(value: dict, analysis: Path, writer: dict, field: str, reason: str,
+                 digest: str | None = None) -> bool:
+    from sheet_schema import SheetValidationError, validate_sheet
+    current_digest = digest or value["source"]["bundle_sha256"]
+    try:
+        validate_sheet(value, analysis_dir=analysis, expected_bundle_sha256=current_digest,
+                       expected_writer=writer)
+    except SheetValidationError as error:
+        return (error.field, error.reason) == (field, reason)
+    return False
+
+
+def _prepare_case(root: Path, *, locality: str = "remote", kind: str = "local",
+                  language: str = "auto") -> tuple[Path, Path, object]:
+    from host_models import ConfigReader
+    from prepare_sheet import SheetPrepareDeps, SheetPrepareRequest
+    root.mkdir(parents=True, exist_ok=True)
+    video = root / "sample.mp4"
+    video.write_bytes(b"video")
+    analysis = root / "sample.analysis"
+    analysis.mkdir()
+    (analysis / "bundle.json").write_text(json.dumps({"speech": {"language": "fr"}}), encoding="utf-8")
+    manifest = {"schema_version": 2, "source": {"path": str(video), "kind": kind},
+                "params": {}, "stages": {}}
+    (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    reader = ConfigReader(root, root, lambda _: None)
+    deps = SheetPrepareDeps(environ={"ANTHROPIC_MODEL": "claude-sonnet-test",
+        "VIDEO_ANALYSIS_AI_LOCALITY": locality}, config_reader=reader)
+    request = SheetPrepareRequest(host="claude-code", language=language)
+    return video, analysis, (request, deps)
+
+
+def check_sheet_schema_valid() -> bool:
+    from sheet_schema import format_hhmmss, validate_sheet
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, sheet, writer = _sheet_fixture(Path(temp))
+        accepted = validate_sheet(sheet, analysis_dir=analysis,
+            expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer)
+        return (accepted == sheet and set(accepted["labels"]) == {
+            "source", "introduction", "summary", "glossary", "figure"}
+            and format_hhmmss(360000.9) == "100:00:00")
+
+
+def check_sheet_schema_required_unknown_labels() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        missing = dict(valid); del missing["title"]
+        unknown = dict(valid); unknown["extra"] = True
+        labels = dict(valid); del labels["labels"]
+        wrong_labels = dict(valid); wrong_labels["labels"] = {**valid["labels"], "extra": "x"}
+        return (_sheet_error(missing, analysis, writer, "title", "is required")
+            and _sheet_error(unknown, analysis, writer, "$", "must contain only schema fields")
+            and _sheet_error(labels, analysis, writer, "labels", "is required")
+            and _sheet_error(wrong_labels, analysis, writer, "labels", "must contain only schema fields"))
+
+
+def check_sheet_schema_types_text() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        wrong = json.loads(json.dumps(valid)); wrong["schema_version"] = True
+        empty = json.loads(json.dumps(valid)); empty["chapters"][0]["text"] = "  "
+        labels = json.loads(json.dumps(valid)); labels["labels"]["summary"] = ""
+        return (_sheet_error(wrong, analysis, writer, "schema_version", "must be schema version 1")
+            and _sheet_error(empty, analysis, writer, "chapters[0].text", "must be a non-empty string")
+            and _sheet_error(labels, analysis, writer, "labels.summary", "must be a non-empty string"))
+
+
+def check_sheet_schema_intervals() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["start"] = 5
+        return _sheet_error(wrong, analysis, writer, "chapters[0]", "must satisfy 0 <= start < end")
+
+
+def check_sheet_schema_ordering() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"].append({**wrong["chapters"][0],
+            "start": 4, "end": 6, "frame": None})
+        return _sheet_error(wrong, analysis, writer, "chapters[1]", "must be ordered and non-overlapping")
+
+
+def check_sheet_schema_frame_time() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["time"] = 6
+        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.time", "must be within chapter interval")
+
+
+def check_sheet_schema_frame_paths() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        paths = ("/tmp/frame.jpg", "C:/frame.jpg", "../frame.jpg", "frames\\frame.jpg", "frames/./frame.jpg")
+        for path in paths:
+            wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = path
+            if not _sheet_error(wrong, analysis, writer, "chapters[0].frame.file",
+                                "must be a normalized relative path inside the analysis folder"):
+                return False
+        return True
+
+
+def check_sheet_schema_missing_frame() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        wrong = json.loads(json.dumps(valid)); wrong["chapters"][0]["frame"]["file"] = "frames/missing.jpg"
+        return _sheet_error(wrong, analysis, writer, "chapters[0].frame.file", "file does not exist")
+
+
+def check_sheet_schema_digest() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        return _sheet_error(valid, analysis, writer, "source.bundle_sha256",
+                            "does not match current bundle.json", "0" * 64)
+
+
+def check_sheet_schema_writer() -> bool:
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        analysis, _, valid, writer = _sheet_fixture(Path(temp))
+        return _sheet_error(valid, analysis, {**writer, "model": "other"}, "writer",
+                            "does not match sheet preparation")
+
+
+def check_sheet_seek_links() -> bool:
+    from sheet_schema import build_seek_link
+    return (build_seek_link("https://www.youtube.com/watch?v=x&list=y&t=2s", 9.8)
+            == "https://www.youtube.com/watch?v=x&list=y&t=9s"
+            and build_seek_link("https://youtu.be/x?feature=y", 10) == "https://youtu.be/x?feature=y&t=10s"
+            and build_seek_link("https://vimeo.com/123?share=1#old", 11) == "https://vimeo.com/123?share=1#t=11s"
+            and build_seek_link("https://example.com/video", 12) is None
+            and build_seek_link("https://vimeo.com/", 12) is None)
+
+
+def check_sheet_prepare_default_provenance() -> bool:
+    from prepare_sheet import run_prepare
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, (request, deps) = _prepare_case(Path(temp))
+        request = replace(request, allow_remote_ai=True)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = run_prepare(video, request, deps)
+        manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        params = manifest["params"]["sheet_prepare"]
+        brief = (analysis / "sheet.brief.md").read_text(encoding="utf-8")
+        return (result == 0 and params["model"] == "claude-sonnet-test"
+            and params["language"] == "fr" and "role=default" in output.getvalue()
+            and "host default" not in params["model"] and "claude-haiku" not in brief)
+
+
+def check_sheet_prepare_consent_matrix() -> bool:
+    from prepare_sheet import run_prepare
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        root = Path(temp)
+        video, analysis, (request, deps) = _prepare_case(root / "denied")
+        before = {p.name: p.read_bytes() for p in analysis.iterdir()}
+        denied = run_prepare(video, request, deps)
+        after = {p.name: p.read_bytes() for p in analysis.iterdir()}
+        denied_manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        only_manifest = set(before) == set(after) and all(
+            before[name] == after[name] for name in before if name != "manifest.json")
+        denied_ok = (denied == 4 and only_manifest
+            and denied_manifest["stages"]["sheet_prepare"] == {"status": "denied",
+                "consent": {"required": True, "granted": False}})
+        approved_video, approved_dir, (approved_request, approved_deps) = _prepare_case(root / "approved")
+        approved = run_prepare(approved_video, replace(approved_request, allow_remote_ai=True), approved_deps)
+        local_video, _, (local_request, local_deps) = _prepare_case(root / "local", locality="local")
+        local_ok = run_prepare(local_video, local_request, local_deps) == 0
+        url_video, url_dir, (url_request, url_deps) = _prepare_case(root / "url", kind="url")
+        url_ok = run_prepare(url_video, url_request, url_deps) == 0
+        return denied_ok and approved == 0 and local_ok and url_ok
+
+
+def check_sheet_prepare_brief_contract() -> bool:
+    from prepare_sheet import run_prepare
+    from sheet_schema import SHEET_JSON_SCHEMA_V1
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
+        if run_prepare(video, request, deps) != 0:
+            return False
+        brief = (analysis / "sheet.brief.md").read_text(encoding="utf-8")
+        manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+        params = manifest["params"]["sheet_prepare"]
+        return (json.dumps(SHEET_JSON_SCHEMA_V1, ensure_ascii=False, indent=2) in brief
+            and str((analysis / "bundle.json").resolve()) in brief
+            and str((analysis / "sheet.json").resolve()) in brief
+            and params["host"] in brief and params["model"] in brief
+            and "low-cost" in brief and "do not call a provider" in brief.lower()
+            and manifest["stages"]["sheet_prepare"]["consent"] == {
+                "required": False, "granted": True, "method": "not-required"})
+
+
+def check_sheet_prepare_resume_conflicts() -> bool:
+    from prepare_sheet import run_prepare
+    with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
+        video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
+        if run_prepare(video, request, deps) != 0:
+            return False
+        brief = analysis / "sheet.brief.md"
+        before = brief.read_bytes()
+        resumed = run_prepare(video, request, deps) == 0 and brief.read_bytes() == before
+        brief.unlink()
+        recreated = run_prepare(video, request, deps) == 0 and brief.exists()
+        (analysis / "manifest.json").write_text(json.dumps({"schema_version": 2, "source": {"kind": "local"},
+            "params": {}, "stages": {}}))
+        brief_conflict = run_prepare(video, request, deps) == 3 and brief.exists()
+        return resumed and recreated and brief_conflict
 
 
 def make_offset_video(target: Path) -> None:
@@ -2163,6 +2396,36 @@ def main() -> int:
     checks["bundle manifest resumes and conflicts safely"] = run_check(
         "bundle manifest resumes and conflicts safely", lambda: check_bundle_manifest_resume_conflict(video))
     try:
+        checks["sheet schema accepts valid v1"] = run_check(
+            "sheet schema accepts valid v1", check_sheet_schema_valid)
+        checks["sheet schema rejects missing and unknown fields with named errors"] = run_check(
+            "sheet schema rejects missing and unknown fields with named errors", check_sheet_schema_required_unknown_labels)
+        checks["sheet schema rejects wrong types and empty required text"] = run_check(
+            "sheet schema rejects wrong types and empty required text", check_sheet_schema_types_text)
+        checks["sheet schema rejects invalid chapter intervals"] = run_check(
+            "sheet schema rejects invalid chapter intervals", check_sheet_schema_intervals)
+        checks["sheet schema rejects unordered and overlapping chapters"] = run_check(
+            "sheet schema rejects unordered and overlapping chapters", check_sheet_schema_ordering)
+        checks["sheet schema rejects frame time outside its chapter"] = run_check(
+            "sheet schema rejects frame time outside its chapter", check_sheet_schema_frame_time)
+        checks["sheet schema blocks absolute drive traversal and non-normal frame paths"] = run_check(
+            "sheet schema blocks absolute drive traversal and non-normal frame paths", check_sheet_schema_frame_paths)
+        checks["sheet schema rejects missing frame files"] = run_check(
+            "sheet schema rejects missing frame files", check_sheet_schema_missing_frame)
+        checks["sheet schema rejects stale bundle digest"] = run_check(
+            "sheet schema rejects stale bundle digest", check_sheet_schema_digest)
+        checks["sheet schema rejects writer identity mismatch"] = run_check(
+            "sheet schema rejects writer identity mismatch", check_sheet_schema_writer)
+        checks["seek links cover YouTube Vimeo and unsupported sources"] = run_check(
+            "seek links cover YouTube Vimeo and unsupported sources", check_sheet_seek_links)
+        checks["sheet preparation uses host default model provenance"] = run_check(
+            "sheet preparation uses host default model provenance", check_sheet_prepare_default_provenance)
+        checks["sheet preparation consent matrix enforces write boundaries"] = run_check(
+            "sheet preparation consent matrix enforces write boundaries", check_sheet_prepare_consent_matrix)
+        checks["sheet brief contains exact schema and writer values"] = run_check(
+            "sheet brief contains exact schema and writer values", check_sheet_prepare_brief_contract)
+        checks["sheet preparation resumes and conflicts safely"] = run_check(
+            "sheet preparation resumes and conflicts safely", check_sheet_prepare_resume_conflicts)
         checks["ffmpeg resolution precedence"] = run_check("ffmpeg resolution precedence", check_tool_resolution)
         checks["host resolver detects explicit and marked hosts with provenance"] = run_check(
             "host resolver detects explicit and marked hosts with provenance", check_host_detection_and_provenance)
