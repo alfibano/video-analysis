@@ -31,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dest", type=Path, help="download folder for URL sources")
     parser.add_argument("--sub-langs", nargs="+", metavar="LANG",
                         help="subtitle languages to fetch (URLs only)")
+    parser.add_argument("--comments", type=int, default=100, metavar="N",
+                        help="save at most N top-level comments from a URL (0 to disable; maximum 100)")
     parser.add_argument("--interval", type=float, help="base frame interval in seconds")
     parser.add_argument("--dedup-threshold", type=float, help="key-frame difference threshold")
     parser.add_argument("--model", help="Whisper model name")
@@ -111,13 +113,20 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as error:
         return 0 if error.code == 0 else 2
     url = is_url(args.source)
+    if not 0 <= args.comments <= 100:
+        print("--comments must be between 0 and 100", file=sys.stderr)
+        return 2
     if not url and args.sub_langs:
         print("--sub-langs is only valid for an HTTP(S) URL", file=sys.stderr)
+        return 2
+    if not url and args.comments != 100:
+        print("--comments is only valid for an HTTP(S) URL", file=sys.stderr)
         return 2
     video = args.source
     if url:
         print("STEP fetch", file=sys.stderr)
         fetch_args = [args.source]
+        fetch_args.extend(("--comments", str(args.comments)))
         if args.dest is not None:
             fetch_args.extend(("--dest", str(args.dest)))
         if args.sub_langs:

@@ -190,11 +190,172 @@ def check_fetch_manifest() -> bool:
                         and "sponsorblock_remove" not in option_sets[1])
     has_progress = all(option.get("noprogress") is True
                        and len(option.get("progress_hooks", [])) == 1 for option in option_sets)
-    return (calls == [False, True, True] and video.is_file() and (folder / "metadata.json").is_file()
+    comment_options = option_sets[3].get("extractor_args", {}).get("youtube", {})
+    return (calls == [False, True, True, False] and video.is_file() and (folder / "metadata.json").is_file()
             and manifest["source"].get("kind") == "url"
             and manifest["params"]["fetch"]["url"].startswith("https://")
             and option_sets[1]["outtmpl"] == str(dest.resolve() / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.%(ext)s")
-            and "fetch" in accepted["stages"] and has_sponsorblock and has_progress)
+            and "fetch" in accepted["stages"] and has_sponsorblock and has_progress
+            and option_sets[3].get("getcomments") is True
+            and comment_options == {"comment_sort": ["top"], "max_comments": [100, 100, 0, 0, 1]})
+
+
+def check_sheet_facts() -> bool:
+    import sheet_facts
+    from tools import make_temp_folder
+    video = make_temp_folder("sheet-facts-") / "video.mp4"
+    video.write_bytes(b"video-bytes")
+    raw = {"title": "raw", "channel": "Channel", "channel_url": "https://example.invalid/c",
+           "upload_date": "20240102", "duration": 12, "width": 640, "height": 360,
+           "view_count": 4, "like_count": -1, "comment_count": "8", "timestamp": 1,
+           "subtitles": {"fr": [{}], "": [{}]}, "automatic_captions": {"en": [{}]},
+           "description": "See https://example.invalid/a). https://example.invalid/a) javascript:bad"}
+    facts = sheet_facts.build_sheet_facts(video, metadata={"title": "normalized"}, raw_info=raw,
+        manifest={}, bundle={"source": {"duration": 9.5}, "speech": {"language": "fr"}})
+    expected = {"title": "normalized", "channel_name": "Channel", "channel_url": "https://example.invalid/c",
+                "youtube_publication_date": "2024-01-02",
+                "duration_s": 9.5, "file_size_mb": len(b"video-bytes") / 1_048_576, "resolution": "640x360",
+                "view_count": 4, "manual_subtitle_languages": ["fr"], "automatic_caption_language_count": 1,
+                "audio_language": "fr", "description_links": ["https://example.invalid/a"]}
+    fallback = sheet_facts.build_sheet_facts(video, metadata={"upload_date": "bad", "duration": 0},
+        raw_info={"timestamp": 0, "view_count": 1.5, "channel_url": "javascript:bad",
+                  "uploader_url": "https://example.invalid/u", "description": "https://example.invalid/d"},
+        manifest={"duration_s": 4}, bundle={})
+    return (facts == expected and list(facts) == list(sheet_facts.FACT_KEYS[:1]) + [k for k in sheet_facts.FACT_KEYS[1:] if k in facts]
+            and fallback == {"channel_url": "https://example.invalid/u", "youtube_publication_date": "1970-01-01",
+                             "duration_s": 4, "file_size_mb": len(b"video-bytes") / 1_048_576,
+                             "description_links": ["https://example.invalid/d"]}
+            and sheet_facts.canonical_sha256(facts) == sheet_facts.canonical_sha256(dict(reversed(list(facts.items())))))
+
+
+def check_sheet_accounting() -> bool:
+    import sheet_cost
+    sheet = {"chapters": [{"blocks": [{"frame": {"file": "a.jpg"}}, {"frame": None}],
+                           "callouts": [{"sources": ["1", "2"]}]}]}
+    manifest = {"stages": {"correct_transcript": {"status": "done", "usage": {"total_tokens": 30},
+                                                    "reported_cost_usd": 0.25}}}
+    result = sheet_cost.build_sheet_accounting(manifest=manifest, provider="claude-code", model="sonnet",
+        brief_text="abcd", bundle_text="efgh", sheet_text="12345678", sheet=sheet)
+    return (result["tokens"] == {"measured": 30, "estimated_input": 1602, "estimated_output": 2,
+                                 "estimated": 1604, "total": 1634}
+            and result["usd"]["measured"] == 0.25 and result["usd"]["estimated"] > 0
+            and result["usd"]["total"] == result["usd"]["estimated"] + 0.25
+            and "2026-11-03" in result["basis"]["estimated"])
+
+
+def check_sheet_accounting_incomplete() -> bool:
+    import sheet_cost
+    base = {"stages": {"correct_transcript": {"status": "done", "usage": {"input_tokens": 2,
+        "output_tokens": 3}, "reported_cost_usd": None}}}
+    sheet = {"chapters": []}
+    missing = sheet_cost.build_sheet_accounting(manifest=base, provider=None, model="unknown",
+        brief_text="", bundle_text="", sheet_text="", sheet=sheet)
+    skipped = sheet_cost.build_sheet_accounting(manifest={"stages": {"correct_transcript": {"status": "skipped"}}},
+        provider=None, model="claude-haiku-5-5", brief_text="", bundle_text="", sheet_text="", sheet=sheet)
+    return missing["tokens"]["measured"] == 5 and missing["usd"]["measured"] == "n/a" \
+        and missing["usd"]["total"] == "n/a" and skipped["usd"]["measured"] == 0.0
+
+
+def check_comments_fetch() -> bool:
+    import fetch_video
+    from tools import make_temp_folder
+    root = make_temp_folder("comments-fetch-")
+    dest = root / "downloads"
+    info = {"_type": "video", "id": "comment-id", "title": "Comment fixture", "language": "fr",
+            "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": [],
+            "comments": [{"text": "sentinel", "author": "PRIVATE", "parent": "root"}]}
+    video = dest / "comment_fixture_comment_id.mp4"
+    calls = []
+    options = []
+    class FakeYDL:
+        def __init__(self, opts): self.opts = opts; options.append(opts)
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def extract_info(self, url, *, download=True):
+            calls.append((self.opts, download))
+            if download:
+                video.parent.mkdir(parents=True, exist_ok=True); video.write_bytes(b"v")
+                info["requested_downloads"] = [{"filepath": str(video)}]
+            if self.opts.get("getcomments"):
+                return {"comments": [{"text": "top", "parent": "root", "like_count": "2", "timestamp": 4,
+                    "is_pinned": 1, "reply_count": 3, "author": "SECRET", "author_url": "SECRET_URL"},
+                    {"text": "reply", "parent": "top", "author": "SECRET"}]}
+            return info
+        def sanitize_info(self, value): return value
+        def prepare_filename(self, value): return str(video)
+    code = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "1"], ydl_factory=FakeYDL)
+    folder = video.parent / f"{video.stem}.analysis"
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    raw = (folder / "raw_info.json").read_text(encoding="utf-8")
+    comments = json.loads((folder / "comments.json").read_text(encoding="utf-8"))
+    before = sum(bool(opts.get("getcomments")) for opts, _ in calls)
+    rerun = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "1"], ydl_factory=FakeYDL)
+    after = sum(bool(opts.get("getcomments")) for opts, _ in calls)
+    artifact = (folder / "comments.json").read_bytes()
+    conflict = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "2"],
+                                ydl_factory=FakeYDL)
+    preserved = (folder / "comments.json").read_bytes() == artifact
+    legacy = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    legacy["params"]["extract"] = {"interval": 5}
+    legacy["stages"].update({"extract": {"status": "done", "frames": 4},
+                             "correct_transcript": {"status": "skipped"}, "bundle": {"status": "done"}})
+    legacy["params"].pop("comments", None)
+    legacy["stages"].pop("comments", None)
+    old_params, old_stages = json.loads(json.dumps(legacy["params"])), json.loads(json.dumps(legacy["stages"]))
+    (folder / "comments.json").unlink()
+    (folder / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
+    old_downloads = sum(download for _, download in calls)
+    old_comment_passes = after
+    upgrade = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "2"],
+                               ydl_factory=FakeYDL)
+    upgraded = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    return (code == rerun == upgrade == 0 and conflict == 3 and preserved
+            and manifest["params"]["comments"] == {"limit": 1, "sort": "top"}
+            and manifest["stages"]["comments"] == {"status": "done", "output": "comments.json", "count": 1}
+            and comments == [{"text": "top", "like_count": 2, "timestamp": 4, "is_pinned": True, "reply_count": 3}]
+            and "SECRET" not in raw and "comments" not in json.loads(raw) and after == before
+            and upgraded["params"] == {**old_params, "comments": {"limit": 2, "sort": "top"}}
+            and upgraded["stages"] == {**old_stages, "comments": {"status": "done", "output": "comments.json", "count": 1}}
+            and sum(download for _, download in calls) == old_downloads
+            and sum(bool(opts.get("getcomments")) for opts, _ in calls) == old_comment_passes + 1)
+
+
+def check_comments_states() -> bool:
+    import fetch_video
+    from tools import make_temp_folder
+    valid = fetch_video.main(["https://example.invalid/x", "--comments", "101"], ydl_factory=lambda _: None) == 2
+    negative = fetch_video.main(["https://example.invalid/x", "--comments", "-1"], ydl_factory=lambda _: None) == 2
+    root = make_temp_folder("comments-states-")
+    video = root / "video.mp4"; video.write_bytes(b"v")
+    class FailedYDL:
+        def __init__(self, _): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def extract_info(self, *_args, **_kwargs): raise RuntimeError("offline failure")
+    disabled, disabled_warning = fetch_video.run_comments_substage("url", video=video, analysis=root,
+        limit=0, ydl_factory=FailedYDL)
+    unavailable, warning = fetch_video.run_comments_substage("url", video=video, analysis=root,
+        limit=1, ydl_factory=FailedYDL)
+    return (valid and negative and disabled == {"status": "disabled", "count": 0}
+            and disabled_warning is None and unavailable == {"status": "unavailable", "count": 0,
+            "reason": "offline failure"} and warning == "offline failure"
+            and fetch_video.sanitize_comments({"comments": []}, 0) == [])
+
+
+def check_analyze_video_comments() -> bool:
+    import analyze_video
+    calls = []
+    def fetch(argv, *, on_video=None):
+        calls.append(argv); on_video(Path("downloaded.mp4")); return 0
+    with (patch.object(analyze_video, "fetch_main", side_effect=fetch),
+          patch.object(analyze_video, "extract_main", return_value=0),
+          patch.object(analyze_video, "correct_main", return_value=0),
+          patch.object(analyze_video, "bundle_main", return_value=0),
+          contextlib.redirect_stderr(io.StringIO())):
+        code = analyze_video.main(["https://example.invalid/talk", "--comments", "5"])
+    with contextlib.redirect_stderr(io.StringIO()):
+        local = analyze_video.main(["local.mp4", "--comments", "5"])
+    return code == 0 and "--comments" in calls[0] and calls[0][calls[0].index("--comments") + 1] == "5" and local == 2
 
 
 def check_safe_video_stem() -> bool:
@@ -261,9 +422,10 @@ def check_subtitle_failure_is_best_effort() -> bool:
     subtitles = manifest["stages"]["fetch"]["subtitles"]
     return (result == 0 and video.is_file() and (work / "metadata.json").is_file()
             and subtitles == {"requested": ["en"], "saved": [], "missing": ["en"]}
-            and len(option_sets) == 3 and "writesubtitles" not in option_sets[1]
+            and len(option_sets) == 4 and "writesubtitles" not in option_sets[1]
             and "writeautomaticsub" not in option_sets[1] and "ignoreerrors" not in option_sets[1]
             and option_sets[2].get("ignoreerrors") is True
+            and option_sets[3].get("getcomments") is True
             and output.getvalue().startswith("WARNING: subtitles unavailable for en (HTTP Error 429"))
 
 
@@ -2695,6 +2857,18 @@ def main() -> int:
     checks["bundle manifest resumes and conflicts safely"] = run_check(
         "bundle manifest resumes and conflicts safely", lambda: check_bundle_manifest_resume_conflict(video))
     try:
+        checks["sheet facts are deterministic sourced and omit missing values"] = run_check(
+            "sheet facts are deterministic sourced and omit missing values", check_sheet_facts)
+        checks["sheet accounting combines measured correction and estimated writing"] = run_check(
+            "sheet accounting combines measured correction and estimated writing", check_sheet_accounting)
+        checks["sheet accounting marks incomplete or unknown USD as n/a"] = run_check(
+            "sheet accounting marks incomplete or unknown USD as n/a", check_sheet_accounting_incomplete)
+        checks["comments fetch is bounded private and independently resumable"] = run_check(
+            "comments fetch is bounded private and independently resumable", check_comments_fetch)
+        checks["comments disable and unavailable states are explicit"] = run_check(
+            "comments disable and unavailable states are explicit", check_comments_states)
+        checks["analyze_video forwards bounded comments"] = run_check(
+            "analyze_video forwards bounded comments", check_analyze_video_comments)
         checks["sheet schema accepts valid v1"] = run_check(
             "sheet schema accepts valid v1", check_sheet_schema_valid)
         checks["sheet schema rejects missing and unknown fields with named errors"] = run_check(

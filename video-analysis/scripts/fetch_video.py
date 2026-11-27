@@ -8,7 +8,7 @@ import shutil
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from metadata import normalize_metadata
 from progress import ProgressWriter
@@ -17,6 +17,7 @@ from tools import resolve_ffmpeg, resolve_js_runtime
 SPONSOR_CATEGORIES = ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview",
                       "music_offtopic", "filler"]
 SUBTITLE_SUFFIXES = {".vtt", ".srt", ".ass", ".lrc", ".json3", ".ttml"}
+MAX_COMMENTS = 100
 
 
 def safe_video_stem(title: str, video_id: str) -> str:
@@ -132,6 +133,66 @@ def build_subtitle_options(dest: Path, languages: list[str],
     return options
 
 
+def build_comment_options(dest: Path, limit: int) -> dict[str, Any]:
+    if not 0 <= limit <= MAX_COMMENTS:
+        raise ValueError(f"comment limit must be between 0 and {MAX_COMMENTS}")
+    options = build_ydl_options(dest)
+    options.update({"skip_download": True, "getcomments": True,
+                    "extractor_args": {"youtube": {"comment_sort": ["top"],
+                                     "max_comments": [limit, limit, 0, 0, 1]}}})
+    return options
+
+
+def _clean_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, result)
+
+
+def sanitize_comments(info: Mapping[str, Any], limit: int) -> list[dict[str, Any]]:
+    comments = info.get("comments")
+    if not isinstance(comments, list) or limit <= 0:
+        return []
+    clean = []
+    for comment in comments:
+        if not isinstance(comment, Mapping) or comment.get("parent") != "root":
+            continue
+        text = comment.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        stamp = comment.get("timestamp")
+        try:
+            timestamp = int(stamp) if stamp is not None else None
+        except (TypeError, ValueError, OverflowError):
+            timestamp = None
+        clean.append({"text": text.strip(), "like_count": _clean_count(comment.get("like_count")),
+                      "timestamp": timestamp, "is_pinned": bool(comment.get("is_pinned")),
+                      "reply_count": _clean_count(comment.get("reply_count"))})
+        if len(clean) >= limit:
+            break
+    return clean
+
+
+def run_comments_substage(url: str, *, video: Path, analysis: Path, limit: int,
+                          ydl_factory: Callable[[dict[str, Any]], Any]
+                          ) -> tuple[dict[str, Any], str | None]:
+    if limit == 0:
+        return {"status": "disabled", "count": 0}, None
+    try:
+        with ydl_factory(build_comment_options(video.parent, limit)) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+        clean = sanitize_comments(info, limit)
+        (analysis / "comments.json").write_text(_bounded_json(clean), encoding="utf-8")
+        return {"status": "done", "output": "comments.json", "count": len(clean)}, None
+    except Exception as error:
+        reason = " ".join(str(error).split())[:160] or type(error).__name__
+        return {"status": "unavailable", "count": 0, "reason": reason}, reason
+
+
 def subtitle_result(info: dict[str, Any] | None, requested: list[str], dest: Path,
                    video: Path) -> tuple[dict[str, Any], dict[str, list[str]]]:
     info = info or {}
@@ -181,6 +242,8 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     work = video.parent / f"{video.stem}.analysis"
     work.mkdir(exist_ok=True)
     sanitized = ydl.sanitize_info(info)
+    sanitized = dict(sanitized) if isinstance(sanitized, Mapping) else {}
+    sanitized.pop("comments", None)
     (work / "metadata.json").write_text(_bounded_json(normalize_metadata(info)), encoding="utf-8")
     (work / "raw_info.json").write_text(_bounded_json(sanitized), encoding="utf-8")
     (work / "sponsorblock.json").write_text(
@@ -209,6 +272,54 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     return work
 
 
+def _existing_fetch(dest: Path, stem: str, url: str) -> tuple[Path, Path, dict[str, Any]] | None:
+    work = dest / f"{stem}.analysis"
+    if not work.exists():
+        return None
+    manifest_path = work / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("existing analysis folder has no fetch manifest")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("existing fetch manifest is invalid")
+    source = manifest.get("source", {})
+    stages = manifest.get("stages", {})
+    params = manifest.get("params", {})
+    fetch = params.get("fetch", {}) if isinstance(params, Mapping) else {}
+    fetch_stage = stages.get("fetch") if isinstance(stages, Mapping) else None
+    path = Path(str(source.get("path", ""))).resolve() if isinstance(source, Mapping) else Path()
+    if (not isinstance(source, Mapping) or source.get("kind") != "url"
+            or not isinstance(fetch, Mapping) or fetch.get("url") != url
+            or not isinstance(fetch_stage, Mapping)
+            or fetch_stage.get("status") != "done"
+            or not path.is_file() or path.parent != dest.resolve() or path.stem != stem):
+        raise ValueError("existing analysis folder does not match this URL and video")
+    stat = path.stat()
+    if source.get("size") != stat.st_size or source.get("mtime_ns") != stat.st_mtime_ns:
+        raise ValueError("existing downloaded video identity changed")
+    return work, path, manifest
+
+
+def _resume_comments(work: Path, video: Path, manifest: dict[str, Any], url: str, limit: int,
+                     factory: Callable[[dict[str, Any]], Any]) -> int:
+    params = {"limit": limit, "sort": "top"}
+    old_params = manifest.get("params", {}).get("comments")
+    stage = manifest.get("stages", {}).get("comments")
+    if old_params != params and (work / "comments.json").exists():
+        print("comments conflict: requested limit differs from existing comments.json")
+        return 3
+    if old_params == params and isinstance(stage, Mapping) and stage.get("status") in {"done", "disabled"}:
+        return 0
+    stage, warning = run_comments_substage(url, video=video, analysis=work, limit=limit,
+                                           ydl_factory=factory)
+    manifest.setdefault("params", {})["comments"] = params
+    manifest.setdefault("stages", {})["comments"] = stage
+    (work / "manifest.json").write_text(_bounded_json(manifest), encoding="utf-8")
+    if warning:
+        print(f"WARNING: comments unavailable ({warning})")
+    return 0
+
+
 def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]], Any] | None = None,
          on_video: Callable[[Path], None] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -228,10 +339,15 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
                         help="folder for the downloaded video (default: %(default)s)")
     parser.add_argument("--sub-langs", nargs="+", metavar="LANG",
                         help="subtitle languages to save (default: the video's language and en)")
+    parser.add_argument("--comments", type=int, default=MAX_COMMENTS, metavar="N",
+                        help="save at most N top-level comments (0 to disable; maximum 100)")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 0 if error.code == 0 else 2
+    if not 0 <= args.comments <= MAX_COMMENTS:
+        print(f"--comments must be between 0 and {MAX_COMMENTS}", file=sys.stderr)
+        return 2
     try:
         args.dest.mkdir(parents=True, exist_ok=True)
         preflight_options = build_ydl_options(args.dest.resolve(), sub_langs=args.sub_langs)
@@ -239,6 +355,22 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         with factory(preflight_options) as ydl:
             preflight_info = download_video(args.url, ydl, download=False)
         refuse_unsupported(preflight_info)
+        stem = safe_video_stem(str(preflight_info.get("title") or ""),
+                               str(preflight_info.get("id") or "video"))
+        try:
+            existing = _existing_fetch(args.dest.resolve(), stem, args.url)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"FETCH REFUSED: {error}")
+            return 3
+        if existing is not None:
+            work, video, manifest = existing
+            if on_video is not None:
+                on_video(video)
+            code = _resume_comments(work, video, manifest, args.url, args.comments, factory)
+            if code == 0:
+                print(f"FETCHED: {video}")
+                print(f"WORK FOLDER: {work}")
+            return code
         options = build_ydl_options(args.dest.resolve(), preflight_info, args.sub_langs)
         with factory(options) as ydl:
             info = download_video(args.url, ydl)
@@ -259,9 +391,18 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         info["requested_subtitles"] = subtitle_info.get("requested_subtitles") or {}
         fetch_params = {"url": args.url, "sub_langs": languages}
         work = write_context(video, info, context_ydl, fetch_params, subtitle_status)
+        manifest_path = work / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        comment_stage, comment_error = run_comments_substage(args.url, video=video, analysis=work,
+                                                              limit=args.comments, ydl_factory=factory)
+        manifest["params"]["comments"] = {"limit": args.comments, "sort": "top"}
+        manifest["stages"]["comments"] = comment_stage
+        manifest_path.write_text(_bounded_json(manifest), encoding="utf-8")
         if subtitle_status["missing"]:
             reason = subtitle_error or "no matching subtitle files were produced"
             print(f"WARNING: subtitles unavailable for {', '.join(subtitle_status['missing'])} ({reason})")
+        if comment_error:
+            print(f"WARNING: comments unavailable ({comment_error})")
         print(f"FETCHED: {video}")
         print(f"WORK FOLDER: {work}")
         return 0
