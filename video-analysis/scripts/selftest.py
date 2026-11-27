@@ -1477,7 +1477,7 @@ def check_retry_sends_only_refused_chunks() -> bool:
         prompt = kwargs["input"]
         prompts.append((command[command.index("--model") + 1], prompt))
         ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", prompt)]
-        if prompts[-1][0] == "claude-haiku-5-5" and ids[0] == 1:
+        if prompts[-1][0] in {"haiku", "claude-haiku-5-5"} and ids[0] == 1:
             answer = "I cannot provide a correction for this chunk."
         else:
             answer = "\n".join(f"{number}\tspoken words {number - 1}" for number in ids)
@@ -1499,10 +1499,10 @@ def check_retry_sends_only_refused_chunks() -> bool:
     command_output = initial_output.getvalue()
     return (initial == retry == 0 and len(prompts) == 3 and retry_ids == list(range(1, 41))
             and "--provider claude-code" in command_output and "--retry-refused" in command_output
-            and "--model claude-sonnet-5-5" in command_output and "--ai-locality local" in command_output
+            and "--model sonnet" in command_output and "--ai-locality local" in command_output
             and sys.executable in command_output and str(video) in command_output
             and stage["refused_chunks"] == [] and len(stage["attempts"]) == 2
-            and output["segments"][40]["model"] == "claude-haiku-5-5"
+            and output["segments"][40]["model"] in {"haiku", "claude-haiku-5-5"}
             and all(row["model"] == "claude-sonnet-5-5" for row in output["segments"][:40]))
 
 
@@ -1575,6 +1575,12 @@ def check_claude_model_resolution_precedence() -> bool:
     cheap_env = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "cheap"}, reader, ExplicitInput())
     cheap_old = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_SMALL_FAST_MODEL": "old"}, reader, ExplicitInput())
     native = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-sonnet-4"}, reader, ExplicitInput())
+    native_without_model = resolve_host_model(marked, ConfigReader(cwd, home, lambda _: None), ExplicitInput())
+    native_aliases = [resolve_host_model({**marked, "ANTHROPIC_MODEL": model}, reader, ExplicitInput())
+                      for model in ("opus", "sonnet", "opusplan", "claude-opus-4")]
+    already_haiku = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-haiku-4"}, reader, ExplicitInput())
+    custom_glm = resolve_host_model({**marked, "ANTHROPIC_MODEL": "glm-5.3",
+                                     "ANTHROPIC_BASE_URL": "https://custom.invalid"}, reader, ExplicitInput())
     custom = resolve_host_model({**marked, "ANTHROPIC_MODEL": "vendor-special-model",
                                  "ANTHROPIC_BASE_URL": "https://custom.invalid"}, reader, ExplicitInput())
     empty = resolve_host_model(marked, ConfigReader(cwd, home, lambda _: None), ExplicitInput())
@@ -1582,6 +1588,10 @@ def check_claude_model_resolution_precedence() -> bool:
             and user.default_model == "user" and env.default_model == "env"
             and cheap_env.low_cost_model == "cheap" and cheap_old.low_cost_model == "old"
             and native.low_cost_model == "haiku" and custom.low_cost_model is None
+            and native_without_model.low_cost_model == "haiku"
+            and all(item.low_cost_model == "haiku" for item in native_aliases)
+            and already_haiku.low_cost_model == "claude-haiku-4"
+            and custom_glm.low_cost_model == "GLM-5.3-Flash"
             and empty.default_model is None)
 
 
@@ -1593,7 +1603,7 @@ def check_codex_model_resolution_precedence() -> bool:
     home = Path("/codex-home")
     base = ('profile="work"\n[model_providers.test]\nbase_url="https://u:secret@example.invalid/v1?key=x"\n'
             '[profiles.work]\nmodel="gpt-6-luna"\nmodel_provider="test"\n')
-    overlay = 'model="gpt-5.6-sol"\noss_provider="ollama"\n'
+    overlay = 'model="deepseek-v4-pro"\noss_provider="ollama"\n'
     files = {home / "config.toml": base, home / "work.config.toml": overlay}
     reader = ConfigReader(Path("/project"), Path("/home"), lambda path: files.get(path))
     result = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(home)}, reader, ExplicitInput())
@@ -1610,8 +1620,15 @@ def check_codex_model_resolution_precedence() -> bool:
                                         ConfigReader(Path("/project"), Path("/home"),
                                                      lambda path: home_config if path == default_home / "config.toml" else None),
                                         ExplicitInput())
-    return (result.default_model == "gpt-5.6-sol" and result.provider == "ollama"
-            and result.locality == "local" and result.endpoint_identity == "provider:ollama"
+    custom_provider = ('model="deepseek-v4-pro"\nmodel_provider="openrouter"\n')
+    remote_model = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(home)},
+                                      ConfigReader(Path("/project"), Path("/home"),
+                                                   lambda path: custom_provider if path == home / "config.toml" else None),
+                                      ExplicitInput())
+    return (result.default_model == "deepseek-v4-pro" and result.provider == "openai"
+            and result.locality == "remote" and result.endpoint_identity == "provider:openai"
+            and remote_model.provider == "openrouter" and remote_model.locality == "remote"
+            and remote_model.low_cost_model == "deepseek-flash"
             and url_result.endpoint_identity == "https://example.invalid/v1"
             and default_result.default_model == "gpt-6-luna"
             and all(flag in reason for flag in ("configured default", "--oss", "-m", "--profile"))
@@ -1668,12 +1685,18 @@ def check_model_family_siblings() -> bool:
                                           ExplicitInput(host="openclaw")))
     expected = [f"{provider}/{cheap}" if cheap else None for provider, _, cheap in examples]
     bigger = [family.bigger for family in MODEL_FAMILIES]
+    codex_home = Path("/fixture/codex")
+    codex_config = 'model="deepseek-v4-pro"\nmodel_provider="openrouter"\n'
+    foreign_provider = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(codex_home)},
+        ConfigReader(Path("/project"), Path("/home"), lambda path: codex_config
+                     if path == codex_home / "config.toml" else None), ExplicitInput())
     return (len(MODEL_FAMILIES) == 9 and bigger == ["sonnet", "gpt-5.6-sol", None,
             "deepseek-v4-pro", None, None, None, None, None]
             and [item.low_cost_model for item in results] == expected
             and all(item.default_model == f"{provider}/{model}"
                     for item, (provider, model, _) in zip(results, examples))
-            and results[1].low_cost_model == results[1].default_model)
+            and results[1].low_cost_model == results[1].default_model
+            and foreign_provider.low_cost_model == "deepseek-flash")
 
 
 def check_locality_evidence() -> bool:

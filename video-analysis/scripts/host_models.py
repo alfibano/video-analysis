@@ -6,7 +6,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
 
@@ -44,7 +44,7 @@ class ModelFamily:
 
 
 MODEL_FAMILIES = (
-    ModelFamily(("anthropic", "claude"), (r"claude[-_/].*", r"claude.*"), "haiku", "sonnet"),
+    ModelFamily(("anthropic", "claude"), (r"(?:claude[-_/].*|haiku|sonnet|opus|opusplan)",), "haiku", "sonnet"),
     ModelFamily(("openai", "gpt", "codex"), (r"gpt[-_/].*",), "gpt-6-luna", "gpt-5.6-sol"),
     ModelFamily(("glm", "zai", "zhipu"), (r"glm[-_/].*",), "GLM-5.3-Flash", None),
     ModelFamily(("deepseek",), (r"deepseek[-_/].*",), "deepseek-flash", "deepseek-v4-pro"),
@@ -52,7 +52,7 @@ MODEL_FAMILIES = (
     ModelFamily(("mistral",), (r"mistral[-_/].*",), "mistral-small-latest", None),
     ModelFamily(("gemini", "google"), (r"gemini[-_/].*",), "gemini-3.5-flash-lite", None),
     ModelFamily(("kimi", "moonshot"), (r"kimi[-_/].*",), None, None),
-    ModelFamily(("ollama", "lmstudio", "local"), (r".*",), None, None),
+    ModelFamily(("ollama", "lmstudio", "local"), (), None, None),
 )
 
 
@@ -63,7 +63,7 @@ def _read(reader: ConfigReader, path: Path) -> str | None:
         return None
 
 
-def _host(environ: dict[str, str], explicit: ExplicitInput) -> tuple[str, str]:
+def _host(environ: Mapping[str, str], explicit: ExplicitInput) -> tuple[str, str]:
     if explicit.host:
         return explicit.host.strip().lower(), "selected by explicit host input"
     if environ.get("VIDEO_ANALYSIS_HOST"):
@@ -85,7 +85,7 @@ def _json_object(source: str | None) -> dict:
         return {}
 
 
-def _claude_default(environ: dict[str, str], reader: ConfigReader) -> tuple[str | None, str]:
+def _claude_default(environ: Mapping[str, str], reader: ConfigReader) -> tuple[str | None, str]:
     if environ.get("ANTHROPIC_MODEL"):
         return environ["ANTHROPIC_MODEL"], "from ANTHROPIC_MODEL"
     for path, label in ((reader.cwd / ".claude/settings.local.json", "local settings"),
@@ -97,17 +97,19 @@ def _claude_default(environ: dict[str, str], reader: ConfigReader) -> tuple[str 
     return None, "no configured Claude model was found"
 
 
-def _claude_low(environ: dict[str, str], default: str | None,
+def _claude_low(environ: Mapping[str, str], default: str | None,
                 base_url: str | None) -> tuple[str | None, str]:
     for name in ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"):
         if environ.get(name):
             return environ[name], f"from {name}"
-    if not base_url and default and "claude" in default.lower():
+    if not base_url and (default is None or _family("anthropic", default)):
+        if default and (default.lower() in {"haiku"} or default.lower().startswith("claude-haiku")):
+            return default, "configured model already has the low-cost role"
         return "haiku", "native Claude haiku alias; no custom base URL"
     return _family_sibling("anthropic", default, "low_cost")
 
 
-def _toml_config(environ: dict[str, str], reader: ConfigReader) -> tuple[dict, str]:
+def _toml_config(environ: Mapping[str, str], reader: ConfigReader) -> tuple[dict, str]:
     home = Path(environ.get("CODEX_HOME", str(reader.home / ".codex")))
     base = _parse_toml(_read(reader, home / "config.toml"))
     profile = base.get("profile")
@@ -128,14 +130,14 @@ def _parse_toml(source: str | None) -> dict:
 def _codex_values(config: dict) -> tuple[str | None, str, str | None]:
     model = config.get("model")
     model = model if isinstance(model, str) else None
-    selected = config.get("oss_provider") or config.get("model_provider") or "openai"
+    selected = config.get("model_provider") or "openai"
     providers = config.get("model_providers", {})
     entry = providers.get(selected, {}) if isinstance(providers, dict) else {}
     endpoint = entry.get("base_url") if isinstance(entry, dict) else None
     return model, str(selected), endpoint if isinstance(endpoint, str) else None
 
 
-def _openclaw_path(environ: dict[str, str], reader: ConfigReader) -> Path:
+def _openclaw_path(environ: Mapping[str, str], reader: ConfigReader) -> Path:
     if environ.get("OPENCLAW_CONFIG_PATH"):
         return Path(environ["OPENCLAW_CONFIG_PATH"])
     if environ.get("OPENCLAW_STATE_DIR"):
@@ -309,9 +311,14 @@ def _endpoint_identity(endpoint: str | None, provider: str) -> str:
 def _family(provider: str, model: str | None) -> ModelFamily | None:
     normalized_provider, normalized_model = provider.lower(), (model or "").lower()
     normalized_model = normalized_model.split("/", 1)[-1]
-    return next((family for family in MODEL_FAMILIES
-                 if any(alias in normalized_provider for alias in family.provider_aliases)
-                 and any(re.fullmatch(pattern, normalized_model) for pattern in family.model_patterns)), None)
+    local = next((family for family in MODEL_FAMILIES if normalized_provider in family.provider_aliases), None)
+    if local and local in MODEL_FAMILIES[-1:]:
+        return local
+    by_model = next((family for family in MODEL_FAMILIES
+                     if any(re.fullmatch(pattern, normalized_model) for pattern in family.model_patterns)), None)
+    if by_model:
+        return by_model
+    return None
 
 
 def _family_sibling(provider: str, model: str | None, sibling: str) -> tuple[str | None, str]:
@@ -320,12 +327,18 @@ def _family_sibling(provider: str, model: str | None, sibling: str) -> tuple[str
     if not family or not value:
         return None, "no known same-family sibling"
     prefix = model.split("/", 1)[0] + "/" if model and "/" in model else ""
-    if value.lower() in (model or "").lower():
+    if value.lower() in (model or "").lower() or (sibling == "low_cost" and value == "haiku"
+                                                       and (model or "").lower() == "haiku"):
         return model, "configured model already has the low-cost role"
     return prefix + value, f"selected from {provider} model family"
 
 
-def _locality(environ: dict[str, str], explicit: ExplicitInput, provider: str) -> tuple[str, str]:
+def model_sibling(provider: str, model: str | None, sibling: str) -> str | None:
+    """Return the configured family sibling while preserving OpenClaw provider prefixes."""
+    return _family_sibling(provider, model, sibling)[0]
+
+
+def _locality(environ: Mapping[str, str], explicit: ExplicitInput, provider: str) -> tuple[str, str]:
     declared = explicit.locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or environ.get("VIDEO_ANALYSIS_HOST_AI")
     if declared:
         value = "local" if declared.lower() == "local" else "remote"
@@ -335,7 +348,7 @@ def _locality(environ: dict[str, str], explicit: ExplicitInput, provider: str) -
     return "remote", "no local provider evidence or explicit declaration"
 
 
-def _host_model(environ: dict[str, str], reader: ConfigReader, explicit: ExplicitInput,
+def _host_model(environ: Mapping[str, str], reader: ConfigReader, explicit: ExplicitInput,
                 host: str) -> tuple[str | None, str, str | None, str | None, str, str]:
     if host == "claude-code":
         model, reason = _claude_default(environ, reader)
@@ -345,7 +358,7 @@ def _host_model(environ: dict[str, str], reader: ConfigReader, explicit: Explici
     return _configured_host_model(environ, reader, explicit, host)
 
 
-def _configured_host_model(environ: dict[str, str], reader: ConfigReader, explicit: ExplicitInput,
+def _configured_host_model(environ: Mapping[str, str], reader: ConfigReader, explicit: ExplicitInput,
                            host: str) -> tuple[str | None, str, str | None, str | None, str, str]:
     if host == "codex":
         config, reason = _toml_config(environ, reader)
@@ -359,13 +372,11 @@ def _configured_host_model(environ: dict[str, str], reader: ConfigReader, explic
     return model, provider, endpoint, low, why, reason
 
 
-def resolve_host_model(environ: dict[str, str], config_reader: ConfigReader,
+def resolve_host_model(environ: Mapping[str, str], config_reader: ConfigReader,
                        explicit: ExplicitInput) -> HostModel:
     """Resolve safe model facts without filesystem or provider access."""
     host, host_reason = _host(environ, explicit)
     default, provider, endpoint, low, low_reason, default_reason = _host_model(environ, config_reader, explicit, host)
-    if explicit.provider and host not in {"codex", "claude-code"}:
-        provider = explicit.provider
     endpoint_id = "anthropic-native" if host == "claude-code" and not endpoint else _endpoint_identity(endpoint, provider)
     locality, locality_reason = _locality(environ, explicit, provider)
     reasons = (("host", host_reason), ("default_model", default_reason), ("low_cost_model", low_reason),

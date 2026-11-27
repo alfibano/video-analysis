@@ -114,10 +114,25 @@ def report_correction() -> bool:
     """Report host, OpenAI, and declared-local correction readiness without secrets."""
     claude = shutil.which("claude")
     codex = shutil.which("codex") or shutil.which("codex.cmd")
+    openclaw = shutil.which("openclaw") or shutil.which("openclaw.cmd")
     print(f"Claude Code: {claude or 'missing'}")
     print(f"Codex: {codex or 'missing'}")
+    print(f"OpenClaw: {openclaw or 'missing'}")
     print("Host providers use the host's authenticated account")
     env = os.environ
+    try:
+        from host_models import ConfigReader, ExplicitInput, resolve_host_model
+        reader = ConfigReader(Path.cwd(), Path.home(),
+                              lambda path: path.read_text(encoding="utf-8") if path.is_file() else None)
+        host = resolve_host_model(env, reader, ExplicitInput())
+        print(f"Resolved host: {host.host}")
+        print(f"Default model: {host.default_model or 'host default'}")
+        print(f"Low-cost model: {host.low_cost_model or 'none'}")
+        print(f"Resolved provider: {host.provider}")
+        print(f"Resolved locality: {host.locality}")
+        print(f"Selection reason: {dict(host.reasons).get('default_model', 'unknown')}")
+    except (ImportError, OSError, ValueError, RuntimeError):
+        pass
     if "CLAUDECODE" in env:
         selected = "claude-code" if claude else None
         if not claude:

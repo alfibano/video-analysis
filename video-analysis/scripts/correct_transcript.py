@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,7 +67,7 @@ class CorrectedSegment:
 @dataclass(frozen=True, slots=True)
 class CorrectionSettings:
     provider: str
-    model: str
+    model: str | None
     base_url: str | None
     locality: str
     api_key: str | None
@@ -74,6 +75,16 @@ class CorrectionSettings:
     no_correct: bool
     interactive: bool | None
     executable: str | None = None
+    host: str = "unknown"
+    default_model: str | None = None
+    selection_reason: str = "configured provider default"
+    model_role: str = "default"
+    endpoint_identity: str | None = None
+
+
+class ModelInvocation(Enum):
+    HOST_DEFAULT = "host-default"
+    OVERRIDE = "override"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +98,7 @@ class CorrectionRequest:
     api_key: str | None = None
     provider: str | None = None
     retry_refused: bool = False
+    host: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +108,7 @@ class CorrectionDeps:
     interactive: bool | None = None
     which: Callable[[str], str | None] = shutil.which
     subprocess_runner: Callable[..., Any] = subprocess.run
+    config_reader: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +136,7 @@ class ChunkRun:
     context: str
     max_workers: int = 2
     chunk_ordinals: Sequence[int] | None = None
+    invocation: ModelInvocation = ModelInvocation.OVERRIDE
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +199,10 @@ def _load_correction_stage(video: Path, work: Path, language: str,
     source_path = work / (source_file or "")
     stat = source_path.stat() if source_path.is_file() else None
     source_value.update(size=stat.st_size if stat else 0, mtime_ns=stat.st_mtime_ns if stat else 0)
+    selection_identity = {"host": settings.host, "provider": settings.provider, "model": settings.model,
+                          "endpoint_identity": settings.endpoint_identity, "locality": settings.locality}
     params = {"provider": settings.provider, "model": settings.model,
+              "selection_identity": selection_identity,
               "base_url_identity": (_base_url_identity(settings.base_url)
                                     if settings.provider in {"openai", "local"} else None),
               "locality": settings.locality, "prompt_version": PROMPT_VERSION,
@@ -368,7 +385,10 @@ class OpenAIChatClient:
             options["base_url"] = base_url
         self._client = OpenAI(**options)
 
-    def correct(self, *, model: str, system_prompt: str, user_prompt: str) -> Any:
+    def correct(self, *, model: str | None, system_prompt: str, user_prompt: str,
+                invocation: ModelInvocation = ModelInvocation.OVERRIDE) -> Any:
+        if model is None:
+            raise ValueError("OpenAI SDK requires an explicit model")
         return self._client.chat.completions.create(
             model=model, reasoning_effort="low",
             messages=[{"role": "system", "content": system_prompt},
@@ -419,13 +439,17 @@ class ClaudeCodeClient:
     def __init__(self, *, executable: str, runner: Callable[..., Any]) -> None:
         self.executable, self.runner = executable, runner
 
-    def correct(self, *, model: str, system_prompt: str, user_prompt: str) -> ProviderResult:
+    def correct(self, *, model: str | None, system_prompt: str, user_prompt: str,
+                invocation: ModelInvocation = ModelInvocation.OVERRIDE) -> ProviderResult:
         from tools import app_temp_dir
         neutral = app_temp_dir() / "correction-neutral"
         neutral.mkdir(parents=True, exist_ok=True)
-        command = [self.executable, "-p", "--model", model, "--output-format", "json",
+        command = [self.executable, "-p"]
+        if invocation is ModelInvocation.OVERRIDE and model:
+            command.extend(("--model", model))
+        command.extend(["--output-format", "json",
                    "--system-prompt", system_prompt, "--tools", "", "--strict-mcp-config",
-                   "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "project"]
+                   "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "project"])
         try:
             done = self.runner(command, input=user_prompt, capture_output=True, text=True,
                                encoding="utf-8", cwd=str(neutral), timeout=900,
@@ -443,13 +467,17 @@ class CodexClient:
     def __init__(self, *, executable: str, runner: Callable[..., Any]) -> None:
         self.executable, self.runner = executable, runner
 
-    def correct(self, *, model: str, system_prompt: str, user_prompt: str) -> ProviderResult:
+    def correct(self, *, model: str | None, system_prompt: str, user_prompt: str,
+                invocation: ModelInvocation = ModelInvocation.OVERRIDE) -> ProviderResult:
         from tools import app_temp_dir
         neutral = app_temp_dir() / "correction-neutral"
         neutral.mkdir(parents=True, exist_ok=True)
-        command = [self.executable, "exec", "-m", model, "--json", "--skip-git-repo-check",
+        command = [self.executable, "exec"]
+        if invocation is ModelInvocation.OVERRIDE and model:
+            command.extend(("-m", model))
+        command.extend(["--json", "--skip-git-repo-check",
                    "--ephemeral", "-s", "read-only", "-C", str(neutral), "-c",
-                   'model_reasoning_effort="low"', "-"]
+                   'model_reasoning_effort="low"', "-"])
         try:
             done = self.runner(command, input=f"{system_prompt}\n\n{user_prompt}",
                                capture_output=True, text=True, encoding="utf-8",
@@ -459,6 +487,37 @@ class CodexClient:
             return parse_codex_result(done.stdout)
         except Exception:
             return ProviderResult(None, error=True)
+
+
+class OpenClawClient:
+    """Ephemeral OpenClaw CLI adapter for its JSON agent envelope."""
+
+    def __init__(self, *, executable: str, runner: Callable[..., Any]) -> None:
+        self.executable, self.runner = executable, runner
+
+    def correct(self, *, model: str | None, system_prompt: str, user_prompt: str,
+                invocation: ModelInvocation = ModelInvocation.OVERRIDE) -> ProviderResult:
+        command = [self.executable, "agent", "exec", f"{system_prompt}\n\n{user_prompt}"]
+        if invocation is ModelInvocation.OVERRIDE and model:
+            command.extend(("--model", model))
+        command.append("--json")
+        try:
+            done = self.runner(command, capture_output=True, text=True, encoding="utf-8",
+                               timeout=900, shell=False, check=False)
+            payload = json.loads(done.stdout)
+            if done.returncode or payload.get("status") not in (None, "ok", "success", "completed"):
+                return ProviderResult(None, error=True)
+            return ProviderResult(payload.get("final"), usage=_openclaw_usage(payload.get("usage")))
+        except Exception:
+            return ProviderResult(None, error=True)
+
+
+def _openclaw_usage(value: Any) -> TokenUsage:
+    if not isinstance(value, Mapping):
+        return TokenUsage()
+    incoming, outgoing = int(value.get("input_tokens", 0)), int(value.get("output_tokens", 0))
+    return TokenUsage(incoming, int(value.get("cached_input_tokens", 0)), outgoing,
+                      int(value.get("reasoning_tokens", 0)), int(value.get("total_tokens", incoming + outgoing)))
 
 
 def _value(item: Any, key: str, default: Any = None) -> Any:
@@ -587,17 +646,40 @@ def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
 
 
 def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> CorrectionSettings:
+    from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    explicit_provider = request.provider or deps.environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER")
+    explicit_host = request.host or ("openclaw" if explicit_provider == "openclaw" else None)
+    host = resolve_host_model(deps.environ, _config_reader(deps),
+                              ExplicitInput(host=explicit_host, locality=request.locality))
     provider, executable = resolve_provider(deps.environ, request.provider, deps.which)
+    if host.host in {"claude-code", "codex", "openclaw"} and not explicit_provider:
+        provider = host.host
+        executable = deps.which({"claude-code": "claude", "codex": "codex", "openclaw": "openclaw"}[provider])
+    if explicit_provider == "openclaw":
+        provider = "openclaw"
+        executable = deps.which("openclaw")
     base_url = request.base_url or deps.environ.get("OPENAI_BASE_URL") or None
-    locality = request.locality or deps.environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
+    locality = request.locality or host.locality
     api_key = request.api_key if request.api_key is not None else deps.environ.get("OPENAI_API_KEY")
     if provider in {"local", "openai"} and not api_key and locality == "local" and base_url:
         api_key = "local-no-key"
-    model = (request.model or deps.environ.get("VIDEO_ANALYSIS_CORRECT_MODEL")
-             or (provider_default_model(provider) if provider in {"claude-code", "codex", "openai", "local"}
-                 else "gpt-6-luna"))
+    explicit_model = request.model or deps.environ.get("VIDEO_ANALYSIS_CORRECT_MODEL")
+    model = explicit_model or host.low_cost_model or host.default_model
+    if provider in {"openai", "local"} and not model:
+        model = provider_default_model(provider)
+    role = "default" if explicit_model or model is None or model == host.default_model else "low-cost"
+    reason = "explicit model selection" if explicit_model else dict(host.reasons).get("low_cost_model", "host default")
     return CorrectionSettings(provider or "none", model, base_url, locality, api_key,
-                              request.allow_remote_ai, request.no_correct, deps.interactive, executable)
+                              request.allow_remote_ai, request.no_correct, deps.interactive, executable,
+                              host.host, host.default_model, reason, role, host.endpoint_identity)
+
+
+def _config_reader(deps: CorrectionDeps) -> Any:
+    if deps.config_reader is not None:
+        return deps.config_reader
+    from host_models import ConfigReader
+    return ConfigReader(Path.cwd(), Path.home(),
+                        lambda path: path.read_text(encoding="utf-8") if path.is_file() else None)
 
 
 def _resume_decision(state: CorrectionStage) -> int | None:
@@ -642,6 +724,8 @@ def make_client(settings: CorrectionSettings, deps: CorrectionDeps) -> Any:
         return ClaudeCodeClient(executable=settings.executable or "claude", runner=deps.subprocess_runner)
     if settings.provider == "codex":
         return CodexClient(executable=settings.executable or "codex", runner=deps.subprocess_runner)
+    if settings.provider == "openclaw":
+        return OpenClawClient(executable=settings.executable or "openclaw", runner=deps.subprocess_runner)
     factory = deps.client_factory or (lambda **kwargs: OpenAIChatClient(**kwargs))
     local = settings.locality == "local"
     return factory(api_key=settings.api_key, base_url=settings.base_url,
@@ -666,7 +750,8 @@ def _run_chunk(run: ChunkRun, chunk: tuple[int, list[CorrectionInput]]) -> tuple
     first_id, items = chunk
     try:
         response = run.client.correct(model=run.model, system_prompt=SYSTEM_PROMPT,
-                                      user_prompt=build_chunk_prompt(run.context, items, first_id))
+                                      user_prompt=build_chunk_prompt(run.context, items, first_id),
+                                      invocation=run.invocation)
         outcome = _provider_result(response)
         if not outcome.refusal and is_prose_refusal(outcome.text, list(range(first_id, first_id + len(items)))):
             outcome = ProviderResult(outcome.text, refusal=True, usage=outcome.usage,
@@ -732,10 +817,9 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
     stage: dict[str, Any] = {"status": "done", "output": state.output_path.name,
                              "chunks": result.chunk_count, "segments": len(rows),
                              "segment_statuses": counts, "usage": result.usage}
-    refused_chunks = [index + 1 for index, offset in enumerate(range(0, len(rows), CHUNK_SIZE))
-                      if rows[offset:offset + CHUNK_SIZE]
-                      and all(item.status == "fallback_refusal" for item in rows[offset:offset + CHUNK_SIZE])]
+    refused_chunks = _refused_chunk_numbers(rows)
     stage["refused_chunks"] = refused_chunks
+    stage["selection"] = _selection_manifest(settings)
     stage["attempts"] = [result.attempt or {"mode": "initial", "provider": settings.provider,
                                              "model": settings.model,
                                              "chunks": list(range(1, result.chunk_count + 1)),
@@ -746,10 +830,22 @@ def _write_correction_result(state: CorrectionStage, settings: CorrectionSetting
         stage["consent"] = consent
     state.manifest["stages"]["correct_transcript"] = stage
     _write_manifest(state.work / "manifest.json", state.manifest)
-    print(f"CORRECTION: complete | corrected {counts.get('corrected', 0)} | "
-          f"rejected {sum(v for k, v in counts.items() if k.startswith('rejected_'))} | "
-          f"fallback {sum(v for k, v in counts.items() if k.startswith('fallback_'))}" +
-          (f" | refused chunks {', '.join(map(str, refused_chunks))}" if refused_chunks else ""))
+    summary = (f"CORRECTION: complete | corrected {counts.get('corrected', 0)} | "
+               f"rejected {sum(v for k, v in counts.items() if k.startswith('rejected_'))} | "
+               f"fallback {sum(v for k, v in counts.items() if k.startswith('fallback_'))}")
+    print(summary + (f" | refused chunks {', '.join(map(str, refused_chunks))}" if refused_chunks else ""))
+
+
+def _selection_manifest(settings: CorrectionSettings) -> dict[str, Any]:
+    return {"host": settings.host, "model": settings.model, "model_role": settings.model_role,
+            "reason": settings.selection_reason, "fallback": False, "provider": settings.provider,
+            "endpoint_identity": settings.endpoint_identity, "locality": settings.locality}
+
+
+def _refused_chunk_numbers(rows: Sequence[CorrectedSegment]) -> list[int]:
+    return [index + 1 for index, start in enumerate(range(0, len(rows), CHUNK_SIZE))
+            if rows[start:start + CHUNK_SIZE]
+            and all(row.status == "fallback_refusal" for row in rows[start:start + CHUNK_SIZE])]
 
 
 def _retry_refused(state: CorrectionStage, settings: CorrectionSettings, request: CorrectionRequest,
@@ -852,7 +948,7 @@ def _prepare_correction(video: Path, request: CorrectionRequest,
     video = video.resolve()
     work = video.parent / f"{video.stem}.analysis"
     settings = _resolve_settings(request, deps)
-    if settings.provider not in {"none", "claude-code", "codex", "openai", "local"}:
+    if settings.provider not in {"none", "claude-code", "codex", "openclaw", "openai", "local"}:
         print("unknown correction provider", file=sys.stderr)
         return None, 2
     explicit_provider = bool((request.provider and request.provider != "auto")
@@ -864,14 +960,15 @@ def _prepare_correction(video: Path, request: CorrectionRequest,
         print("local provider requires a base URL and explicit local locality", file=sys.stderr)
         return None, 2
     missing_implicit_host = None
-    if settings.provider in {"claude-code", "codex"} and not settings.executable:
+    if settings.provider in {"claude-code", "codex", "openclaw"} and not settings.executable:
         if explicit_provider:
             print(f"{settings.provider} executable is unavailable", file=sys.stderr)
             return None, 2
         missing_implicit_host = settings.provider
         settings = CorrectionSettings("none", settings.model, settings.base_url, settings.locality,
                                       settings.api_key, settings.allow_remote_ai, settings.no_correct,
-                                      settings.interactive, None)
+                                      settings.interactive, None, settings.host, settings.default_model,
+                                      settings.selection_reason, settings.model_role, settings.endpoint_identity)
     retry_model = settings.model
     if request.retry_refused:
         saved_manifest = _load_json(work / "manifest.json", {})
@@ -879,7 +976,9 @@ def _prepare_correction(video: Path, request: CorrectionRequest,
         if saved_params.get("model"):
             settings = CorrectionSettings(settings.provider, saved_params["model"], settings.base_url,
                                           settings.locality, settings.api_key, settings.allow_remote_ai,
-                                          settings.no_correct, settings.interactive, settings.executable)
+                                          settings.no_correct, settings.interactive, settings.executable,
+                                          settings.host, settings.default_model, settings.selection_reason,
+                                          settings.model_role, settings.endpoint_identity)
     state, load_error = _load_correction_stage(video, work, request.language, settings)
     if state is None:
         return None, load_error or 1
@@ -892,7 +991,9 @@ def _run_loaded_correction(prepared: PreparedCorrection, request: CorrectionRequ
     if request.retry_refused:
         retry_settings = CorrectionSettings(settings.provider, prepared.retry_model, settings.base_url,
                                             settings.locality, settings.api_key, settings.allow_remote_ai,
-                                            settings.no_correct, settings.interactive, settings.executable)
+                                            settings.no_correct, settings.interactive, settings.executable,
+                                            settings.host, settings.default_model, settings.selection_reason,
+                                            settings.model_role, settings.endpoint_identity)
         return _retry_refused(state, retry_settings, request, deps)
     resumed = _resume_decision(state)
     if resumed is not None:
@@ -919,12 +1020,19 @@ def _continue_correction(state: CorrectionStage, settings: CorrectionSettings,
 
 def _execute_correction(state: CorrectionStage, settings: CorrectionSettings,
                         runtime: CorrectionRuntime) -> int:
+    model_label = settings.model or "host default"
+    print(f"AI selection: host={settings.host} model={model_label} role={settings.model_role} "
+          f"reason={settings.selection_reason} locality={settings.locality}")
     consent, consent_error = _consent_decision(state, settings)
     if consent_error is not None:
         return consent_error
     client = make_client(settings, runtime.deps)
     context = _build_stage_context(state.metadata, state.source.language or "unknown")
-    run = ChunkRun(client, settings.model, context, 1 if settings.locality == "local" else 2)
+    invocation = (ModelInvocation.HOST_DEFAULT if settings.model_role == "default"
+                  and settings.provider in {"claude-code", "codex", "openclaw"}
+                  else ModelInvocation.OVERRIDE)
+    run = ChunkRun(client, settings.model, context, 1 if settings.locality == "local" else 2,
+                   invocation=invocation)
     corrected_rows, usage_totals, chunk_count, reported_cost, cost_complete = _correct_chunks(run, state.speech)
     corrected_rows = [CorrectedSegment(row.start, row.end, row.original_text, row.corrected_text,
                                        row.status, settings.provider, settings.model) for row in corrected_rows]
@@ -937,11 +1045,17 @@ def _execute_correction(state: CorrectionStage, settings: CorrectionSettings,
 
 def _print_escalation_if_needed(state: CorrectionStage, settings: CorrectionSettings,
                                 request: CorrectionRequest, consent: dict[str, Any] | None) -> None:
+    from host_models import model_sibling
     refused = state.manifest["stages"]["correct_transcript"].get("refused_chunks", [])
-    higher = {"claude-code": "claude-sonnet-5-5", "codex": "gpt-5.6-sol"}
-    if refused and settings.provider in higher and settings.model == provider_default_model(settings.provider):
+    if refused and settings.model != settings.default_model and settings.provider in {"claude-code", "codex"}:
+        family_provider = "anthropic" if settings.provider == "claude-code" else "openai"
+        higher = model_sibling(family_provider, settings.model, "bigger") or settings.default_model
         command = [sys.executable, str(Path(__file__).resolve()), str(state.video), "--provider", settings.provider,
-                   "--language", request.language, "--retry-refused", "--model", higher[settings.provider]]
+                   "--language", request.language, "--retry-refused"]
+        if request.host:
+            command.extend(("--host", request.host))
+        if higher:
+            command.extend(("--model", higher))
         if settings.locality == "local":
             command.extend(("--ai-locality", "local"))
         if consent:
@@ -965,8 +1079,9 @@ def _parser() -> argparse.ArgumentParser:
         epilog="Exit codes: 0 success, skip, or resume; 1 processing failure; 2 usage or input error; 3 manifest conflict; 4 remote-AI consent required.")
     parser.add_argument("video", type=Path, help="video whose .analysis transcript should be corrected")
     parser.add_argument("--language", default="auto", help="speech language (default: auto)")
-    parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openai", "local"),
+    parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openclaw", "openai", "local"),
                         help="correction provider (default: VIDEO_ANALYSIS_CORRECT_PROVIDER or auto)")
+    parser.add_argument("--host", choices=("claude-code", "codex", "openclaw"), help="AI host supplying model routing")
     parser.add_argument("--model", help="correction model override (default: provider-specific cheap model)")
     parser.add_argument("--retry-refused", action="store_true", help="retry only previously refused chunks")
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
@@ -985,7 +1100,7 @@ def main(argv: list[str] | None = None) -> int:
         request = CorrectionRequest(language=args.language, model=args.model, base_url=args.base_url,
                                     locality=args.ai_locality, allow_remote_ai=args.allow_remote_ai,
                                     no_correct=args.no_correct, provider=args.provider,
-                                    retry_refused=args.retry_refused)
+                                    retry_refused=args.retry_refused, host=args.host)
         return run_correction(args.video, request)
     except Exception as error:
         print(f"correction failed: {error}", file=sys.stderr)
