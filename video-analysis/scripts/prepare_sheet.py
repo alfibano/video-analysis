@@ -171,7 +171,7 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
         consent = ({"required": True, "granted": True, "method": "flag"} if required else
                    {"required": False, "granted": True, "method": "not-required"})
         brief_text = _brief(analysis, digest, params, facts, comments)
-        brief_path.write_text(brief_text, encoding="utf-8")
+        brief_path.write_bytes(brief_text.encode("utf-8"))
         manifest.setdefault("params", {})["sheet_prepare"] = params
         manifest.setdefault("stages", {})["sheet_prepare"] = {"status": "ok", "consent": consent,
             "brief_sha256": hashlib.sha256(brief_text.encode("utf-8")).hexdigest()}

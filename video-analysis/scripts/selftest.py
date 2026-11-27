@@ -786,7 +786,8 @@ def check_prepare_v2_identity() -> bool:
         params, stage = manifest["params"]["sheet_prepare"], manifest["stages"]["sheet_prepare"]
         return (params.get("brief_version") == 2 and params.get("sheet_schema_version") == 2
                 and len(params.get("facts_sha256", "")) == 64 and params.get("comments_sha256") is None
-                and len(stage.get("brief_sha256", "")) == 64)
+                and stage.get("brief_sha256")
+                == hashlib.sha256((analysis / "sheet.brief.md").read_bytes()).hexdigest())
 
 
 def check_sheet_model_facts_rejected() -> bool:
