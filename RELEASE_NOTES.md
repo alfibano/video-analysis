@@ -21,6 +21,8 @@
   by the author. Several distinct frames may appear in each chapter beside their related text.
 - Live DOCX review found and fixed two integration issues: yt-dlp comment arguments are strings, and
   the writer brief is persisted as exact UTF-8 bytes.
+- Fetch resume now matches extractor/video identity and rejects changed subtitle languages; sheet cost
+  estimates use Anthropic list prices only for the native Anthropic endpoint.
 
 ### Measured
 - Default self-test: `DEFAULT_CHECKS=132` (132 passed, 0 failed).

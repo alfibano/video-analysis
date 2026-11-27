@@ -143,7 +143,7 @@ def check_fetch_manifest() -> bool:
         return False
     from tools import make_temp_folder
     dest = make_temp_folder("video-analysis-manifest-")
-    info = {"_type": "video", "id": "test-id", "title": "Sample video", "language": "fr",
+    info = {"_type": "video", "id": "test-id", "extractor_key": "Youtube", "title": "Sample video", "language": "fr",
             "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": []}
     video_name = f"{fetch_video.safe_video_stem(info['title'], info['id'])}.mp4"
     calls: list[bool] = []
@@ -180,6 +180,24 @@ def check_fetch_manifest() -> bool:
     folder = dest / f"{video.stem}.analysis"
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     accepted = load_manifest(folder, manifest["source"], {"interval": 5})
+    manifest_identity = (manifest["params"]["fetch"].get("extractor_key") == "Youtube"
+                         and manifest["params"]["fetch"].get("video_id") == "test-id")
+    try:
+        fetch_video._existing_fetch(dest.resolve(), video.stem, "https://youtu.be/test-id",
+                                    {**info, "id": "different-id"})
+    except ValueError:
+        different_id_refused = True
+    else:
+        different_id_refused = False
+    retry_calls = len(calls)
+    retry_code = fetch_video.main(["https://youtu.be/test-id?si=OTHER", "--dest", str(dest)],
+                                  ydl_factory=FakeYDL)
+    retry_ok = retry_code == 0 and calls[retry_calls:] == [False]
+    conflict_output = io.StringIO()
+    with contextlib.redirect_stdout(conflict_output):
+        subtitle_conflict = fetch_video.main(["https://example.invalid/video", "--dest", str(dest),
+                                               "--sub-langs", "es"], ydl_factory=FakeYDL)
+    subtitle_conflict_ok = subtitle_conflict == 3 and "subtitle" in conflict_output.getvalue().lower()
     preflight_pp = option_sets[0].get("postprocessors", [])
     download_pp = option_sets[1].get("postprocessors", [])
     sponsorblock_pp = [pp for pp in download_pp if pp.get("key") == "SponsorBlock"]
@@ -193,7 +211,8 @@ def check_fetch_manifest() -> bool:
     has_progress = all(option.get("noprogress") is True
                        and len(option.get("progress_hooks", [])) == 1 for option in option_sets)
     comment_options = option_sets[3].get("extractor_args", {}).get("youtube", {})
-    return (calls == [False, True, True, False] and video.is_file() and (folder / "metadata.json").is_file()
+    return (calls[:4] == [False, True, True, False] and video.is_file() and (folder / "metadata.json").is_file()
+            and manifest_identity and different_id_refused and retry_ok and subtitle_conflict_ok
             and manifest["source"].get("kind") == "url"
             and manifest["params"]["fetch"]["url"].startswith("https://")
             and option_sets[1]["outtmpl"] == str(dest.resolve() / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.%(ext)s")
@@ -237,12 +256,18 @@ def check_sheet_accounting() -> bool:
     manifest = {"stages": {"correct_transcript": {"status": "done", "usage": {"total_tokens": 30},
                                                     "reported_cost_usd": 0.25}}}
     result = sheet_cost.build_sheet_accounting(manifest=manifest, provider="claude-code", model="sonnet",
+        endpoint_identity="anthropic-native",
         brief_text="abcd", bundle_text="efgh", sheet_text="12345678", sheet=sheet)
+    custom_endpoint = sheet_cost.build_sheet_accounting(manifest=manifest, provider="claude-code", model="opus",
+        endpoint_identity="https://provider.example/v1", brief_text="abcd", bundle_text="efgh",
+        sheet_text="12345678", sheet=sheet)
     return (result["tokens"] == {"measured": 30, "estimated_input": 1602, "estimated_output": 2,
                                  "estimated": 1604, "total": 1634}
             and result["usd"]["measured"] == 0.25 and result["usd"]["estimated"] > 0
             and result["usd"]["total"] == result["usd"]["estimated"] + 0.25
-            and "2026-11-03" in result["basis"]["estimated"])
+            and "2026-11-03" in result["basis"]["estimated"]
+            and custom_endpoint["usd"]["estimated"] == "n/a"
+            and custom_endpoint["tokens"]["estimated"] > 0)
 
 
 def check_sheet_accounting_incomplete() -> bool:
@@ -739,7 +764,33 @@ def check_sheet_v2_context_budget() -> bool:
         try:
             validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
         except SheetValidationError as error:
-            return error.field == "context.series.first_video_url"
+            if error.field != "context.series.first_video_url":
+                return False
+        else:
+            return False
+        sheet["context"]["series"] = None
+        sheet["chapters"][0]["callouts"] = [{"kind": "question", "text": "x" * 40, "sources": []}]
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        except SheetValidationError as error:
+            if (error.field, error.reason) != ("chapters", "callout text exceeds block text budget"):
+                return False
+        else:
+            return False
+        sheet["chapters"][0]["callouts"] = []
+        sheet["context"]["author_email"] = {"value": "not-an-email", "evidence": "Published slide"}
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        except SheetValidationError as error:
+            if error.field != "context.author_email.value":
+                return False
+        else:
+            return False
+        sheet["context"]["author_email"] = {"value": "author@example.org", "evidence": ""}
+        try:
+            validate_sheet(sheet, analysis_dir=analysis, expected_bundle_sha256=sheet["source"]["bundle_sha256"], expected_writer=writer, expected_source_url="https://youtu.be/abc", expected_duration_s=5)
+        except SheetValidationError as error:
+            return error.field == "context.author_email.evidence"
         return False
 
 
@@ -781,15 +832,31 @@ def check_docx_v2_layout() -> bool:
 
 def check_prepare_v2_identity() -> bool:
     from prepare_sheet import run_prepare
+    import sheet_cost
     with tempfile.TemporaryDirectory(dir=os.environ["VIDEO_ANALYSIS_TEMP_DIR"]) as temp:
         video, analysis, (request, deps) = _prepare_case(Path(temp), locality="local")
         if run_prepare(video, request, deps) != 0: return False
         manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
         params, stage = manifest["params"]["sheet_prepare"], manifest["stages"]["sheet_prepare"]
-        return (params.get("brief_version") == 2 and params.get("sheet_schema_version") == 2
+        native_ok = (params.get("brief_version") == 2 and params.get("sheet_schema_version") == 2
                 and len(params.get("facts_sha256", "")) == 64 and params.get("comments_sha256") is None
+                and params.get("endpoint_identity") == "anthropic-native"
                 and stage.get("brief_sha256")
                 == hashlib.sha256((analysis / "sheet.brief.md").read_bytes()).hexdigest())
+        custom_video, custom_analysis, (custom_request, custom_deps) = _prepare_case(
+            Path(temp) / "custom", locality="local")
+        custom_deps = replace(custom_deps, environ={**custom_deps.environ,
+            "ANTHROPIC_BASE_URL": "https://provider.example/v1", "ANTHROPIC_MODEL": "opus"})
+        if run_prepare(custom_video, custom_request, custom_deps) != 0:
+            return False
+        custom_params = json.loads((custom_analysis / "manifest.json").read_text(encoding="utf-8"))[
+            "params"]["sheet_prepare"]
+        custom_cost = sheet_cost.build_sheet_accounting(manifest={}, provider=custom_params["provider"],
+            model=custom_params["model"], endpoint_identity=custom_params["endpoint_identity"],
+            brief_text="brief", bundle_text="bundle", sheet_text="sheet", sheet={"chapters": []})
+        return (native_ok and custom_params["endpoint_identity"] != "anthropic-native"
+                and custom_cost["usd"]["estimated"] == "n/a"
+                and custom_cost["tokens"]["estimated"] > 0)
 
 
 def check_sheet_model_facts_rejected() -> bool:
@@ -924,7 +991,8 @@ def _render_fixture(root: Path, *, prepared: bool = True) -> tuple[Path, Path, d
         from sheet_facts import build_sheet_facts, canonical_sha256
         facts = build_sheet_facts(video, metadata={}, raw_info={}, manifest=manifest, bundle=json.loads(bundle_path.read_text()))
         manifest["params"]["sheet_prepare"] = {"brief_version": 2, "sheet_schema_version": 2, "facts_sha256": canonical_sha256(facts), "comments_sha256": None, "bundle_sha256": digest, "host": writer["host"],
-            "model": writer["model"], "provider": "anthropic", "locality": "local", "language": "fr"}
+            "model": writer["model"], "provider": "anthropic", "endpoint_identity": "anthropic-native",
+            "locality": "local", "language": "fr"}
         manifest["stages"]["sheet_prepare"] = {"status": "ok", "brief_sha256": hashlib.sha256(b"test brief").hexdigest(), "consent": {"required": False,
             "granted": True, "method": "not-required"}}
     (analysis / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

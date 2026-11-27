@@ -151,7 +151,8 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
         comments_hash = canonical_sha256(comments) if comments is not None else None
         params = {"brief_version": 2, "sheet_schema_version": 2, "facts_sha256": facts_hash,
                   "comments_sha256": comments_hash, "bundle_sha256": digest, "host": host.host, "model": model,
-                  "provider": host.provider, "locality": locality, "language": language}
+                  "provider": host.provider, "endpoint_identity": host.endpoint_identity,
+                  "locality": locality, "language": language}
         _selection(host, model, locality)
         stage = manifest.get("stages", {}).get("sheet_prepare", {})
         previous = manifest.get("params", {}).get("sheet_prepare")

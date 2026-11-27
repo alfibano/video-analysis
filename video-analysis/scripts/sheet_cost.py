@@ -22,7 +22,9 @@ def _nonnegative(value: Any) -> int | float | None:
     return value
 
 
-def _price(provider: str | None, model: str) -> dict[str, Any] | None:
+def _price(provider: str | None, model: str, endpoint_identity: str | None) -> dict[str, Any] | None:
+    if endpoint_identity != "anthropic-native":
+        return None
     normalized = re.sub(r"\s+", "", model.casefold()).replace("_", "-")
     normalized = re.sub(r"\[(?:1m)\]$", "", normalized)
     if normalized in _ALIASES:
@@ -56,13 +58,14 @@ def _correction(manifest: Mapping[str, Any]) -> tuple[int, float | str]:
 
 
 def build_sheet_accounting(*, manifest: Mapping[str, Any], provider: str | None, model: str,
+                           endpoint_identity: str | None = None,
                            brief_text: str, bundle_text: str, sheet_text: str,
                            sheet: Mapping[str, Any]) -> dict[str, Any]:
     measured_tokens, measured_usd = _correction(manifest)
     frames = referenced_frame_count(sheet)
     input_tokens = math.ceil((len(brief_text) + len(bundle_text)) / 4) + 1600 * frames
     output_tokens = math.ceil(len(sheet_text) / 4)
-    rates = _price(provider, model)
+    rates = _price(provider, model, endpoint_identity)
     estimated_usd: float | str = (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000 \
         if rates else "n/a"
     total_usd: float | str = measured_usd + estimated_usd if isinstance(measured_usd, (int, float)) \

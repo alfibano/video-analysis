@@ -345,7 +345,9 @@ def _prepared_sheet(video: Path, manifest_path: Path, bundle_path: Path, sheet_p
     brief_text = brief_path.read_text(encoding="utf-8")
     bundle_text = bundle_path.read_text(encoding="utf-8")
     sheet_text = sheet_path.read_text(encoding="utf-8")
-    accounting = build_sheet_accounting(manifest=manifest, provider=prep_params.get("provider"), model=prep_params.get("model", ""), brief_text=brief_text, bundle_text=bundle_text, sheet_text=sheet_text, sheet=sheet)
+    accounting = build_sheet_accounting(manifest=manifest, provider=prep_params.get("provider"),
+        model=prep_params.get("model", ""), endpoint_identity=prep_params.get("endpoint_identity"),
+        brief_text=brief_text, bundle_text=bundle_text, sheet_text=sheet_text, sheet=sheet)
     return manifest, bundle_digest, sheet, facts, accounting, facts_hash, canonical_sha256(accounting)
 
 

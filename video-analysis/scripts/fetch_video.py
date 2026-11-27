@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import sys
+from urllib.parse import parse_qs, urlparse
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -272,7 +273,21 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     return work
 
 
-def _existing_fetch(dest: Path, stem: str, url: str) -> tuple[Path, Path, dict[str, Any]] | None:
+def _url_video_id(url: object) -> str | None:
+    if not isinstance(url, str):
+        return None
+    parsed = urlparse(url)
+    query_id = parse_qs(parsed.query).get("v", [None])[0]
+    if query_id:
+        return query_id
+    host = parsed.hostname or ""
+    if host.casefold() in {"youtu.be", "www.youtu.be"}:
+        return parsed.path.strip("/").split("/")[0] or None
+    return None
+
+
+def _existing_fetch(dest: Path, stem: str, url: str,
+                    preflight_info: Mapping[str, Any]) -> tuple[Path, Path, dict[str, Any]] | None:
     work = dest / f"{stem}.analysis"
     if not work.exists():
         return None
@@ -288,12 +303,21 @@ def _existing_fetch(dest: Path, stem: str, url: str) -> tuple[Path, Path, dict[s
     fetch = params.get("fetch", {}) if isinstance(params, Mapping) else {}
     fetch_stage = stages.get("fetch") if isinstance(stages, Mapping) else None
     path = Path(str(source.get("path", ""))).resolve() if isinstance(source, Mapping) else Path()
+    current_id = preflight_info.get("id") or _url_video_id(url)
+    current_extractor = preflight_info.get("extractor_key") or preflight_info.get("extractor")
+    saved_id = fetch.get("video_id") if isinstance(fetch, Mapping) else None
+    saved_extractor = fetch.get("extractor_key") if isinstance(fetch, Mapping) else None
+    legacy_url_id = _url_video_id(fetch.get("url")) if isinstance(fetch, Mapping) else None
+    identity_matches = (saved_id == current_id if saved_id is not None else
+                        isinstance(current_id, str) and
+                        (current_id in stem or legacy_url_id == current_id))
+    extractor_matches = (saved_extractor == current_extractor if saved_extractor is not None else True)
     if (not isinstance(source, Mapping) or source.get("kind") != "url"
-            or not isinstance(fetch, Mapping) or fetch.get("url") != url
+            or not isinstance(fetch, Mapping) or not identity_matches or not extractor_matches
             or not isinstance(fetch_stage, Mapping)
             or fetch_stage.get("status") != "done"
             or not path.is_file() or path.parent != dest.resolve() or path.stem != stem):
-        raise ValueError("existing analysis folder does not match this URL and video")
+        raise ValueError("existing analysis folder does not match this video identity")
     stat = path.stat()
     if source.get("size") != stat.st_size or source.get("mtime_ns") != stat.st_mtime_ns:
         raise ValueError("existing downloaded video identity changed")
@@ -301,7 +325,12 @@ def _existing_fetch(dest: Path, stem: str, url: str) -> tuple[Path, Path, dict[s
 
 
 def _resume_comments(work: Path, video: Path, manifest: dict[str, Any], url: str, limit: int,
-                     factory: Callable[[dict[str, Any]], Any]) -> int:
+                     factory: Callable[[dict[str, Any]], Any],
+                     sub_langs: list[str]) -> int:
+    fetch_params = manifest.get("params", {}).get("fetch", {})
+    if isinstance(fetch_params, Mapping) and fetch_params.get("sub_langs") != sub_langs:
+        print("fetch conflict: requested subtitle languages differ from the existing fetch")
+        return 3
     params = {"limit": limit, "sort": "top"}
     old_params = manifest.get("params", {}).get("comments")
     stage = manifest.get("stages", {}).get("comments")
@@ -358,15 +387,18 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         stem = safe_video_stem(str(preflight_info.get("title") or ""),
                                str(preflight_info.get("id") or "video"))
         try:
-            existing = _existing_fetch(args.dest.resolve(), stem, args.url)
+            existing = _existing_fetch(args.dest.resolve(), stem, args.url, preflight_info)
         except (OSError, ValueError, json.JSONDecodeError) as error:
             print(f"FETCH REFUSED: {error}")
             return 3
         if existing is not None:
             work, video, manifest = existing
+            requested_languages = build_ydl_options(args.dest.resolve(), preflight_info,
+                                                    args.sub_langs)["subtitleslangs"]
             if on_video is not None:
                 on_video(video)
-            code = _resume_comments(work, video, manifest, args.url, args.comments, factory)
+            code = _resume_comments(work, video, manifest, args.url, args.comments, factory,
+                                    requested_languages)
             if code == 0:
                 print(f"FETCHED: {video}")
                 print(f"WORK FOLDER: {work}")
@@ -389,7 +421,9 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
         subtitle_info, subtitle_status = subtitle_result(
             subtitle_info, languages, args.dest.resolve(), video)
         info["requested_subtitles"] = subtitle_info.get("requested_subtitles") or {}
-        fetch_params = {"url": args.url, "sub_langs": languages}
+        fetch_params = {"url": args.url, "sub_langs": languages,
+                        "extractor_key": preflight_info.get("extractor_key") or preflight_info.get("extractor"),
+                        "video_id": preflight_info.get("id")}
         work = write_context(video, info, context_ydl, fetch_params, subtitle_status)
         manifest_path = work / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
