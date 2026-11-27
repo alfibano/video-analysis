@@ -1413,6 +1413,7 @@ def check_local_endpoint_without_api_key_uses_placeholder() -> bool:
 
 def check_provider_selection_matrix() -> bool:
     import correct_transcript as correction
+    from host_models import ConfigReader
     def which(name: str) -> str | None:
         return {"claude": "claude-bin", "codex.cmd": "codex-shim"}.get(name)
     matrix = [
@@ -1424,6 +1425,24 @@ def check_provider_selection_matrix() -> bool:
         correction.resolve_provider({"OPENAI_API_KEY": "x"}, "local", which) == ("local", None),
         correction.provider_default_model("codex") == "gpt-6-luna",
     ]
+    reader = ConfigReader(Path.cwd(), Path("/sentinel-home"), lambda path: (
+        '[agents.defaults.model]\nprimary = "ollama/llama"' if path.name == "openclaw.json" else None))
+    codex_reader = ConfigReader(Path.cwd(), Path("/sentinel-home"), lambda path:
+        'model = "gpt-5.6-sol"\nmodel_provider = "ollama"' if path.name == "config.toml" else None)
+    codex_openai = correction._resolve_settings(correction.CorrectionRequest(provider="openai"),
+        correction.CorrectionDeps({"CODEX_SESSION_ID": "x", "VIDEO_ANALYSIS_HOST_AI": "local"},
+                                  which=which, config_reader=codex_reader))
+    openclaw_openai = correction._resolve_settings(correction.CorrectionRequest(host="openclaw"),
+        correction.CorrectionDeps({"OPENAI_API_KEY": "secret"}, which=which, config_reader=reader))
+    conflict_video = Path.cwd() / "conflict-not-written.mp4"
+    conflict_output = io.StringIO()
+    with contextlib.redirect_stderr(conflict_output):
+        conflict = correction.run_correction(conflict_video, correction.CorrectionRequest(
+            provider="openai", host="openclaw"), correction.CorrectionDeps({}, config_reader=reader))
+    matrix.extend([codex_openai.locality == "remote" and codex_openai.model == "gpt-6-luna",
+                   openclaw_openai.provider == "openai" and openclaw_openai.locality == "remote",
+                   conflict == 2 and "explicit host conflicts" in conflict_output.getvalue()
+                   and not conflict_video.exists() and not conflict_video.with_suffix(".analysis").exists()])
     return all(matrix)
 
 
@@ -1479,10 +1498,15 @@ def check_retry_sends_only_refused_chunks() -> bool:
     (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": segments}),
                                           encoding="utf-8")
     prompts = []
+    retry_notices = []
+    retry_output = io.StringIO()
     config_reads = []
     def runner(command, **kwargs):
         prompt = kwargs["input"]
-        prompts.append((command[command.index("--model") + 1], prompt))
+        selected = command[command.index("--model") + 1] if "--model" in command else "host default"
+        prompts.append((selected, prompt))
+        if selected == "host default":
+            retry_notices.append(retry_output.getvalue())
         ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", prompt)]
         if prompts[-1][0] in {"haiku", "claude-haiku-5-5"} and ids[0] == 1:
             answer = "I cannot provide a correction for this chunk."
@@ -1498,8 +1522,8 @@ def check_retry_sends_only_refused_chunks() -> bool:
     initial_output = io.StringIO()
     with contextlib.redirect_stdout(initial_output):
         initial = call_correction(video, provider="claude-code", locality="local", **deps)
-    retry = call_correction(video, provider="claude-code", locality="local", model="claude-sonnet-5-5",
-                             retry_refused=True, **deps)
+    with contextlib.redirect_stdout(retry_output):
+        retry = call_correction(video, provider="claude-code", locality="local", retry_refused=True, **deps)
     output = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     stage = manifest["stages"]["correct_transcript"]
@@ -1507,22 +1531,29 @@ def check_retry_sends_only_refused_chunks() -> bool:
     retry_ids = [int(match.group(1)) for match in re.finditer(r"(?m)^(\d+)\t", retry_prompt)]
     command_output = initial_output.getvalue()
     return (initial == retry == 0 and len(prompts) == 3 and retry_ids == list(range(1, 41))
+            and prompts[-1][0] == "host default" and retry_notices
+            and retry_notices[0].splitlines()[0].startswith(
+                "AI selection: host=claude-code model=host default role=default")
             and "--provider claude-code" in command_output and "--retry-refused" in command_output
             and "--model sonnet" in command_output and "--ai-locality local" in command_output
             and sys.executable in command_output and str(video) in command_output
             and stage["refused_chunks"] == [] and len(stage["attempts"]) == 2
             and output["segments"][40]["model"] in {"haiku", "claude-haiku-5-5"}
-            and all(row["model"] == "claude-sonnet-5-5" for row in output["segments"][:40])
+            and all(row["model"] == "host default" for row in output["segments"][:40])
+            and stage["attempts"][-1]["model"] == "host default"
             and (Path.home() / ".claude/settings.json") not in config_reads)
 
 
 def check_host_adapters_preserve_routing_and_optional_model_flags() -> bool:
     import correct_transcript as correction
+    from host_models import ConfigReader
     calls = []
+    runner_kwargs = []
     def runner(command, **kwargs):
         calls.append(command)
+        runner_kwargs.append(kwargs)
         if command[0] == "openclaw-bin":
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "ok", "final": "1\thello",
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "unverified-status", "text": "1\thello",
                 "usage": {"input_tokens": 2}, "model": "vendor/model", "provider": "vendor"}), stderr="")
         if command[0] == "claude-bin":
             return SimpleNamespace(returncode=0, stdout=json.dumps({"result": "1\thello"}), stderr="")
@@ -1532,8 +1563,17 @@ def check_host_adapters_preserve_routing_and_optional_model_flags() -> bool:
         model=None, system_prompt="s", user_prompt="u", invocation=correction.ModelInvocation.HOST_DEFAULT)
     correction.CodexClient(executable="codex-bin", runner=runner).correct(
         model=None, system_prompt="s", user_prompt="u", invocation=correction.ModelInvocation.HOST_DEFAULT)
+    prompt = "s\n\nu"
     result = correction.OpenClawClient(executable="openclaw-bin", runner=runner).correct(
         model="vendor/model", system_prompt="s", user_prompt="u")
+    def failing_runner(command, **kwargs):
+        return SimpleNamespace(returncode=7, stdout="model not found", stderr="connection refused")
+    failed = correction.OpenClawClient(executable="openclaw-bin", runner=failing_runner).correct(
+        model=None, system_prompt="s", user_prompt="u")
+    def invalid_runner(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+    invalid = correction.OpenClawClient(executable="openclaw-bin", runner=invalid_runner).correct(
+        model=None, system_prompt="s", user_prompt="u")
     from tools import make_temp_folder
     folder = make_temp_folder("correction-openclaw-provenance-")
     video = folder / "openclaw.mp4"
@@ -1543,16 +1583,41 @@ def check_host_adapters_preserve_routing_and_optional_model_flags() -> bool:
     (work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
         {"start": 0, "end": 1, "text": "same words"}]}), encoding="utf-8")
     def openclaw_runner(command, **kwargs):
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "completed", "final": "1\tsame words",
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "completed", "output": "1\tsame words",
             "usage": {"input_tokens": 3}, "model": "vendor/model", "provider": "vendor"}), stderr="")
     integrated = call_correction(video, provider="openclaw", host="openclaw", locality="local", environ={},
-        which=lambda name: "openclaw-bin" if name == "openclaw" else None, subprocess_runner=openclaw_runner)
+        which=lambda name: "openclaw-bin" if name == "openclaw" else None, subprocess_runner=openclaw_runner,
+        config_reader=ConfigReader(Path.cwd(), Path("/sentinel-openclaw-home"),
+            lambda path: '{"agents":{"defaults":{"model":{"primary":"vendor/model"}}}}'
+            if path.name == "openclaw.json" else None))
     segment = json.loads((work / "transcript.corrected.json").read_text(encoding="utf-8"))["segments"][0]
+    default_video = folder / "default.mp4"
+    default_video.write_bytes(b"video")
+    default_work = folder / "default.analysis"
+    default_work.mkdir()
+    (default_work / "transcript.json").write_text(json.dumps({"language": "en", "segments": [
+        {"start": 0, "end": 1, "text": "default words"}]}), encoding="utf-8")
+    default_call = call_correction(default_video, provider="openclaw", host="openclaw", locality="local",
+        environ={}, which=lambda name: "openclaw-bin" if name == "openclaw" else None,
+        subprocess_runner=lambda command, **kwargs: SimpleNamespace(returncode=0,
+            stdout=json.dumps({"content": "1\tdefault words"}), stderr=""),
+        config_reader=ConfigReader(Path.cwd(), Path("/sentinel-empty-openclaw-home"), lambda path: None))
+    default_manifest = json.loads((default_work / "manifest.json").read_text(encoding="utf-8"))
+    default_output = json.loads((default_work / "transcript.corrected.json").read_text(encoding="utf-8"))
+    from tools import app_temp_dir
+    neutral = str(app_temp_dir() / "correction-neutral")
     return ("--model" not in calls[0] and "-m" not in calls[1]
-            and calls[2][:3] == ["openclaw-bin", "agent", "exec"]
+            and calls[2][:4] == ["openclaw-bin", "infer", "model", "run"]
+            and "agent" not in calls[2] and prompt not in calls[2]
             and calls[2][calls[2].index("--model"):calls[2].index("--model") + 2] == ["--model", "vendor/model"]
-            and calls[2][-1] == "--json" and result.text == "1\thello" and result.usage.input_tokens == 2
+            and calls[2][-1] == "--json" and runner_kwargs[2].get("input") == prompt
+            and runner_kwargs[2].get("cwd") == neutral
+            and result.text == "1\thello" and result.usage.input_tokens == 2
+            and failed.failure_category == correction.FailureCategory.TRANSPORT
+            and invalid.error and "--model" in calls[-1] and calls[-1][calls[-1].index("--model") + 1] == "vendor/model"
             and result.reported_model == "vendor/model" and result.reported_provider == "vendor"
+            and default_call == 0 and default_output["segments"][0]["model"] == "host default"
+            and default_manifest["stages"]["correct_transcript"]["attempts"][0]["model"] == "host default"
             and integrated == 0 and segment["model"] == "vendor/model" and segment["provider"] == "vendor")
 
 
@@ -1655,6 +1720,7 @@ def check_selection_manifest_and_resume_identity_are_strict() -> bool:
         create=lambda **call: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
             content="1\toriginal words", refusal=False))], usage=None))))
     first = call_correction(video, client_factory=client, api_key="fake", locality="local", environ={})
+    unchanged = call_correction(video, client_factory=client, api_key="fake", locality="local", environ={})
     manifest_path = work / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     identity = manifest["params"]["correct_transcript"]["selection_identity"]
@@ -1670,7 +1736,7 @@ def check_selection_manifest_and_resume_identity_are_strict() -> bool:
     del identity["host"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     second = call_correction(video, client_factory=client, api_key="fake", locality="local", environ={})
-    return first == 0 and strict and changes_conflict and second == 3
+    return first == 0 and unchanged == 0 and strict and changes_conflict and second == 3
 
 
 def check_refusal_escalation_follows_family_table() -> bool:
@@ -1681,7 +1747,8 @@ def check_refusal_escalation_follows_family_table() -> bool:
             and model_sibling("glm", "GLM-5.3-Flash", "bigger") is None
             and model_sibling("anthropic", "sonnet", "bigger") == "sonnet"
             and no_bigger == correction.EscalationChoice("glm-session-default")
-            and correction._escalation_choice("claude-code", "session-model", "session-model") is None)
+            and correction._escalation_choice("claude-code", "session-model", "session-model") is None
+            and correction._escalation_choice("openclaw", "host default", None) is None)
 
 
 def check_setup_reports_resolved_host_readiness_without_secrets() -> bool:
@@ -1689,12 +1756,13 @@ def check_setup_reports_resolved_host_readiness_without_secrets() -> bool:
     from host_models import ConfigReader
     output = io.StringIO()
     fake_reader = ConfigReader(Path.cwd(), Path("/sentinel-setup-home"), lambda path: None)
-    with patch.object(setup_tools.shutil, "which", side_effect=lambda name: "codex-bin" if name == "codex" else None), \
+    with patch.object(setup_tools.shutil, "which", side_effect=lambda name: "openclaw-bin" if name == "openclaw" else None), \
+            patch.object(setup_tools, "resolve_host_model", side_effect=RuntimeError("safe resolver failure")), \
             patch.object(setup_tools.importlib, "import_module", side_effect=ImportError()), \
             contextlib.redirect_stdout(output):
-        setup_tools.report_correction({"CODEX_SESSION_ID": "offline", "OPENAI_API_KEY": "secret"}, fake_reader)
+        setup_tools.report_correction({"VIDEO_ANALYSIS_HOST": "openclaw", "OPENAI_API_KEY": "secret"}, fake_reader)
     rendered = output.getvalue()
-    return ("Resolved host: codex" in rendered and "Resolved locality: remote" in rendered
+    return ("OpenClaw: openclaw-bin" in rendered and "Resolver unavailable:" in rendered
             and "secret" not in rendered and str(Path.home()) not in rendered)
 
 
@@ -1775,8 +1843,8 @@ def check_claude_model_resolution_precedence() -> bool:
     cheap_old = resolve_host_model({**marked, "ANTHROPIC_MODEL": "x", "ANTHROPIC_SMALL_FAST_MODEL": "old"}, reader, ExplicitInput())
     native = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-sonnet-4"}, reader, ExplicitInput())
     native_without_model = resolve_host_model(marked, ConfigReader(cwd, home, lambda _: None), ExplicitInput())
-    native_aliases = [resolve_host_model({**marked, "ANTHROPIC_MODEL": model}, reader, ExplicitInput())
-                      for model in ("opus", "sonnet", "opusplan", "claude-opus-4")]
+    native_aliases = [(model, resolve_host_model({**marked, "ANTHROPIC_MODEL": model}, reader, ExplicitInput()))
+                      for model in ("haiku", "sonnet", "sonnet[1m]", "opus", "opus[1m]", "default", "opusplan")]
     already_haiku = resolve_host_model({**marked, "ANTHROPIC_MODEL": "claude-haiku-4"}, reader, ExplicitInput())
     custom_glm = resolve_host_model({**marked, "ANTHROPIC_MODEL": "glm-5.3",
                                      "ANTHROPIC_BASE_URL": "https://custom.invalid"}, reader, ExplicitInput())
@@ -1788,7 +1856,8 @@ def check_claude_model_resolution_precedence() -> bool:
             and cheap_env.low_cost_model == "cheap" and cheap_old.low_cost_model == "old"
             and native.low_cost_model == "haiku" and custom.low_cost_model is None
             and native_without_model.low_cost_model == "haiku"
-            and all(item.low_cost_model == "haiku" for item in native_aliases)
+            and all(item.low_cost_model == model for model, item in native_aliases[:-1])
+            and native_aliases[-1][1].low_cost_model == "haiku"
             and already_haiku.low_cost_model == "claude-haiku-4"
             and custom_glm.low_cost_model == "GLM-5.3-Flash"
             and empty.default_model is None)
@@ -1867,7 +1936,7 @@ def check_openclaw_json5_resolution() -> bool:
 
 def check_model_family_siblings() -> bool:
     try:
-        from host_models import ConfigReader, ExplicitInput, MODEL_FAMILIES, resolve_host_model
+        from host_models import ConfigReader, ExplicitInput, LOCAL_PROVIDERS, MODEL_FAMILIES, resolve_host_model
     except ImportError:
         return False
     examples = (("anthropic", "claude-sonnet-4", "haiku"), ("openai", "gpt-6-luna", "gpt-6-luna"),
@@ -1889,8 +1958,10 @@ def check_model_family_siblings() -> bool:
     foreign_provider = resolve_host_model({"CODEX_SESSION_ID": "x", "CODEX_HOME": str(codex_home)},
         ConfigReader(Path("/project"), Path("/home"), lambda path: codex_config
                      if path == codex_home / "config.toml" else None), ExplicitInput())
-    return (len(MODEL_FAMILIES) == 9 and bigger == ["sonnet", "gpt-5.6-sol", None,
-            "deepseek-v4-pro", None, None, None, None, None]
+    return (len(MODEL_FAMILIES) == 8 and bigger == ["sonnet", "gpt-5.6-sol", None,
+            "deepseek-v4-pro", None, None, None, None]
+            and LOCAL_PROVIDERS == {"ollama", "lmstudio", "local"}
+            and not hasattr(ExplicitInput, "provider")
             and [item.low_cost_model for item in results] == expected
             and all(item.default_model == f"{provider}/{model}"
                     for item, (provider, model, _) in zip(results, examples))
@@ -1905,7 +1976,7 @@ def check_locality_evidence() -> bool:
         return False
     cases = (("custom", "http://127.0.0.1:11434/v1", {}, "remote"), ("ollama", None, {}, "local"),
              ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "local"}, "local"),
-             ("custom", None, {"VIDEO_ANALYSIS_HOST_AI": "local"}, "local"),
+             ("custom", None, {"VIDEO_ANALYSIS_HOST_AI": "local"}, "remote"),
              ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "nearby"}, "remote"),
              ("custom", None, {"VIDEO_ANALYSIS_AI_LOCALITY": "remote"}, "remote"))
     for index, (provider, endpoint, env, _) in enumerate(cases):

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from tools import Tool, resolve_ffmpeg, resolve_js_runtime, resolve_ytdlp
+from host_models import ConfigReader, ExplicitInput, resolve_host_model
 
 PACKAGES: dict[str, str] = {
     "PIL": "Pillow",
@@ -120,8 +121,8 @@ def report_correction(environ: Mapping[str, str] | None = None, config_reader: A
     print(f"OpenClaw: {openclaw or 'missing'}")
     print("Host providers use the host's authenticated account")
     env = environ if environ is not None else os.environ
+    host = None
     try:
-        from host_models import ConfigReader, ExplicitInput, resolve_host_model
         reader = config_reader or ConfigReader(Path.cwd(), Path.home(),
                                                 lambda path: path.read_text(encoding="utf-8") if path.is_file() else None)
         host = resolve_host_model(env, reader, ExplicitInput())
@@ -131,16 +132,13 @@ def report_correction(environ: Mapping[str, str] | None = None, config_reader: A
         print(f"Resolved provider: {host.provider}")
         print(f"Resolved locality: {host.locality}")
         print(f"Selection reason: {dict(host.reasons).get('default_model', 'unknown')}")
-    except (ImportError, OSError, ValueError, RuntimeError):
-        pass
-    if "CLAUDECODE" in env:
-        selected = "claude-code" if claude else None
-        if not claude:
-            print("Claude Code host detected but its executable is missing")
-    elif "CODEX_THREAD_ID" in env or "CODEX_SESSION_ID" in env:
-        selected = "codex" if codex else None
-        if not codex:
-            print("Codex host detected but its executable is missing")
+    except Exception as error:
+        print(f"Resolver unavailable: {type(error).__name__}")
+    host_executables = {"claude-code": claude, "codex": codex, "openclaw": openclaw}
+    if host is not None and host.host in host_executables:
+        selected = host.host if host_executables[host.host] else None
+        if selected is None:
+            print(f"{host.host} host detected but its executable is missing")
     elif env.get("OPENAI_API_KEY"):
         selected = "openai"
     elif env.get("VIDEO_ANALYSIS_CORRECT_PROVIDER") == "local" and env.get("OPENAI_BASE_URL") and env.get("VIDEO_ANALYSIS_AI_LOCALITY") == "local":

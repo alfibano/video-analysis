@@ -24,7 +24,6 @@ class HostModel:
 @dataclass(frozen=True, slots=True)
 class ExplicitInput:
     host: str | None = None
-    provider: str | None = None
     locality: str | None = None
 
 
@@ -52,8 +51,8 @@ MODEL_FAMILIES = (
     ModelFamily(("mistral",), (r"mistral[-_/].*",), "mistral-small-latest", None),
     ModelFamily(("gemini", "google"), (r"gemini[-_/].*",), "gemini-3.5-flash-lite", None),
     ModelFamily(("kimi", "moonshot"), (r"kimi[-_/].*",), None, None),
-    ModelFamily(("ollama", "lmstudio", "local"), (), None, None),
 )
+LOCAL_PROVIDERS = frozenset({"ollama", "lmstudio", "local"})
 
 
 def _read(reader: ConfigReader, path: Path) -> str | None:
@@ -103,8 +102,9 @@ def _claude_low(environ: Mapping[str, str], default: str | None,
         if environ.get(name):
             return environ[name], f"from {name}"
     if not base_url:
-        if default:
-            return _family_sibling("anthropic", default, "low_cost")
+        native_aliases = {"haiku", "sonnet", "sonnet[1m]", "opus", "opus[1m]", "default"}
+        if default and (default.casefold() in native_aliases or "haiku" in default.casefold()):
+            return default, "configured native Claude alias already selected"
         return "haiku", "native Claude haiku alias; no custom base URL"
     return _family_sibling("anthropic", default, "low_cost")
 
@@ -327,8 +327,7 @@ def _family_sibling(provider: str, model: str | None, sibling: str) -> tuple[str
     if not family or not value:
         return None, "no known same-family sibling"
     prefix = model.split("/", 1)[0] + "/" if model and "/" in model else ""
-    if value.lower() in (model or "").lower() or (sibling == "low_cost" and value == "haiku"
-                                                       and (model or "").lower() == "haiku"):
+    if value.lower() in (model or "").lower():
         return model, "configured model already has the low-cost role"
     return prefix + value, f"selected from {provider} model family"
 
@@ -339,35 +338,34 @@ def model_sibling(provider: str, model: str | None, sibling: str) -> str | None:
 
 
 def _locality(environ: Mapping[str, str], explicit: ExplicitInput, provider: str) -> tuple[str, str]:
-    declared = explicit.locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or environ.get("VIDEO_ANALYSIS_HOST_AI")
+    declared = explicit.locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY")
     if declared:
         value = "local" if declared.lower() == "local" else "remote"
         return value, "explicit locality declaration" if declared.lower() in {"local", "remote"} else "invalid locality defaults to remote"
-    if provider.lower() in {"ollama", "lmstudio", "local"}:
+    if provider.lower() in LOCAL_PROVIDERS:
         return "local", "provider ID identifies local inference"
     return "remote", "no local provider evidence or explicit declaration"
 
 
-def _host_model(environ: Mapping[str, str], reader: ConfigReader, explicit: ExplicitInput,
+def _host_model(environ: Mapping[str, str], reader: ConfigReader,
                 host: str) -> tuple[str | None, str, str | None, str | None, str, str]:
     if host == "claude-code":
         model, reason = _claude_default(environ, reader)
         endpoint = environ.get("ANTHROPIC_BASE_URL")
         low, why = _claude_low(environ, model, endpoint)
         return model, "anthropic", endpoint, low, why, reason
-    return _configured_host_model(environ, reader, explicit, host)
+    return _configured_host_model(environ, reader, host)
 
 
-def _configured_host_model(environ: Mapping[str, str], reader: ConfigReader, explicit: ExplicitInput,
+def _configured_host_model(environ: Mapping[str, str], reader: ConfigReader,
                            host: str) -> tuple[str | None, str, str | None, str | None, str, str]:
     if host == "codex":
         config, reason = _toml_config(environ, reader)
         model, provider, endpoint = _codex_values(config)
     elif host == "openclaw":
         model, provider, endpoint, reason = _openclaw_values(_read(reader, _openclaw_path(environ, reader)))
-        provider = explicit.provider or provider
     else:
-        return None, explicit.provider or "unknown", None, None, "host has no model configuration", "no host model resolved"
+        return None, "unknown", None, None, "host has no model configuration", "no host model resolved"
     low, why = _family_sibling(provider, model, "low_cost")
     return model, provider, endpoint, low, why, reason
 
@@ -376,7 +374,7 @@ def resolve_host_model(environ: Mapping[str, str], config_reader: ConfigReader,
                        explicit: ExplicitInput) -> HostModel:
     """Resolve safe model facts without filesystem or provider access."""
     host, host_reason = _host(environ, explicit)
-    default, provider, endpoint, low, low_reason, default_reason = _host_model(environ, config_reader, explicit, host)
+    default, provider, endpoint, low, low_reason, default_reason = _host_model(environ, config_reader, host)
     endpoint_id = "anthropic-native" if host == "claude-code" and not endpoint else _endpoint_identity(endpoint, provider)
     locality, locality_reason = _locality(environ, explicit, provider)
     reasons = (("host", host_reason), ("default_model", default_reason), ("low_cost_model", low_reason),
