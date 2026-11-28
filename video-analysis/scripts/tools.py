@@ -9,7 +9,17 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 
-TEMP_DIR_ENV = "VIDEO_ANALYSIS_TEMP_DIR"
+PRIMARY_ENV_PREFIX = "VIDEO_DIGEST_"
+LEGACY_ENV_PREFIX = "VIDEO_ANALYSIS_"
+TEMP_DIR_ENV = f"{PRIMARY_ENV_PREFIX}TEMP_DIR"
+LEGACY_TEMP_DIR_ENV = f"{LEGACY_ENV_PREFIX}TEMP_DIR"
+
+
+def env_value(environ: Mapping[str, str], suffix: str, default: str | None = None) -> str | None:
+    """Resolve one product setting by key presence, preserving an explicitly empty primary value."""
+    primary = f"{PRIMARY_ENV_PREFIX}{suffix}"
+    legacy = f"{LEGACY_ENV_PREFIX}{suffix}"
+    return environ[primary] if primary in environ else environ.get(legacy, default)
 
 
 def media_source_kind(manifest: Mapping[str, Any]) -> str:
@@ -30,11 +40,12 @@ def same_video(recorded: Mapping[str, Any], identity: Mapping[str, Any]) -> bool
 
 def app_temp_path(env: Mapping[str, str] | None = None) -> Path:
     environ = os.environ if env is None else env
-    override = environ.get(TEMP_DIR_ENV, "").strip()
+    selected_name = TEMP_DIR_ENV if TEMP_DIR_ENV in environ else LEGACY_TEMP_DIR_ENV
+    override = (env_value(environ, "TEMP_DIR") or "").strip()
     if override:
         path = Path(override)
         if not path.is_absolute():
-            raise ValueError(f"{TEMP_DIR_ENV} must be an absolute path")
+            raise ValueError(f"{selected_name} must be an absolute path")
         return path
     return Path(__file__).resolve().parent.parent / "_temp"
 
@@ -62,7 +73,7 @@ def resolve_command(command: str, *, env_var: str | None = None,
                     env: Mapping[str, str] | None = None,
                     which: Callable[[str], str | None] = shutil.which) -> Tool | None:
     environ = os.environ if env is None else env
-    override = environ.get(env_var, "").strip() if env_var else ""
+    override = (env_value(environ, env_var.removeprefix(PRIMARY_ENV_PREFIX)) or "").strip() if env_var else ""
     if override:
         return Tool(override, "env")
     path = which(command)
@@ -72,7 +83,7 @@ def resolve_command(command: str, *, env_var: str | None = None,
 def resolve_ffmpeg(*, env: Mapping[str, str] | None = None,
                    which: Callable[[str], str | None] = shutil.which,
                    imageio_lookup: Callable[[], str] | None = None) -> Tool | None:
-    command = resolve_command("ffmpeg", env_var="VIDEO_ANALYSIS_FFMPEG", env=env, which=which)
+    command = resolve_command("ffmpeg", env_var=f"{PRIMARY_ENV_PREFIX}FFMPEG", env=env, which=which)
     if command:
         return command
     if imageio_lookup is None:
@@ -99,7 +110,7 @@ def resolve_ytdlp(*, env: Mapping[str, str] | None = None,
                   which: Callable[[str], str | None] = shutil.which,
                   module_lookup: Callable[[str], Any] | None = None) -> Tool | None:
     environ = os.environ if env is None else env
-    override = environ.get("VIDEO_ANALYSIS_YTDLP", "").strip()
+    override = (env_value(environ, "YTDLP") or "").strip()
     if override:
         return Tool(override, "env")
     path = which("yt-dlp")

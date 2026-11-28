@@ -42,8 +42,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="try CUDA then restart on CPU, or select CPU only during extraction")
     parser.add_argument("--correct-model", help="transcript correction model")
     parser.add_argument("--host", choices=("claude-code", "codex", "openclaw"), help="host providing AI models")
-    parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openai", "local"),
-                        help="transcript correction provider")
+    parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openclaw", "openai", "local"),
+                        metavar="PROVIDER", help="transcript correction provider")
     parser.add_argument("--retry-refused", action="store_true", help="retry refused correction chunks")
     parser.add_argument("--base-url", help="OpenAI-compatible correction endpoint")
     parser.add_argument("--ai-locality", choices=("local", "remote"), help="correction endpoint locality")

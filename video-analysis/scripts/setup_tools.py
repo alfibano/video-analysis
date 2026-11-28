@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from tools import Tool, resolve_ffmpeg, resolve_js_runtime, resolve_ytdlp
+from tools import Tool, env_value, resolve_ffmpeg, resolve_js_runtime, resolve_ytdlp
 from host_models import ConfigReader, ExplicitInput, resolve_host_model
 
 PACKAGES: dict[str, str] = {
@@ -198,7 +198,7 @@ def report_correction(environ: Mapping[str, str] | None = None, config_reader: A
             print(f"{host.host} host detected but its executable is missing")
     elif env.get("OPENAI_API_KEY"):
         selected = "openai"
-    elif env.get("VIDEO_ANALYSIS_CORRECT_PROVIDER") == "local" and env.get("OPENAI_BASE_URL") and env.get("VIDEO_ANALYSIS_AI_LOCALITY") == "local":
+    elif env_value(env, "CORRECT_PROVIDER") == "local" and env.get("OPENAI_BASE_URL") and env_value(env, "AI_LOCALITY") == "local":
         selected = "local"
     else:
         selected = None

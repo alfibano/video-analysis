@@ -356,7 +356,8 @@ def correction_skip_reason(*, no_correct: bool, source: str, api_key: str | None
 def resolve_provider(environ: Mapping[str, str], explicit: str | None = None,
                      which: Callable[[str], str | None] = shutil.which) -> tuple[str | None, str | None]:
     """Resolve explicit, environment, or host-account provider without invoking it."""
-    provider = explicit if explicit not in (None, "auto") else environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER")
+    from tools import env_value
+    provider = explicit if explicit not in (None, "auto") else env_value(environ, "CORRECT_PROVIDER")
     if provider is None or provider == "auto":
         if "CLAUDECODE" in environ:
             provider = "claude-code"
@@ -708,9 +709,10 @@ def load_matching_correction(work: Path, params: Mapping[str, Any], source: Any,
 
 def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> CorrectionSettings:
     from host_models import ExplicitInput, resolve_host_model
+    from tools import env_value
     explicit_provider = (request.provider if request.provider not in (None, "auto")
-                         else deps.environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER"))
-    explicit_host = request.host or deps.environ.get("VIDEO_ANALYSIS_HOST")
+                         else env_value(deps.environ, "CORRECT_PROVIDER"))
+    explicit_host = request.host or env_value(deps.environ, "HOST")
     if explicit_provider in {"claude-code", "codex", "openclaw"}:
         explicit_host = explicit_provider
     host = resolve_host_model(deps.environ, _config_reader(deps),
@@ -724,7 +726,7 @@ def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> Corre
     api_key = request.api_key if request.api_key is not None else deps.environ.get("OPENAI_API_KEY")
     if provider in {"local", "openai"} and not api_key and locality == "local" and base_url:
         api_key = "local-no-key"
-    explicit_model = request.model or deps.environ.get("VIDEO_ANALYSIS_CORRECT_MODEL")
+    explicit_model = request.model or env_value(deps.environ, "CORRECT_MODEL")
     host_provider = provider in {"claude-code", "codex", "openclaw"} and provider == host.host
     default_model = host.default_model if host_provider else provider_default_model(provider) if provider in {"openai", "local"} else None
     low_model = host.low_cost_model if host_provider else provider_default_model(provider) if provider in {"openai", "local"} else None
@@ -737,11 +739,13 @@ def _resolve_settings(request: CorrectionRequest, deps: CorrectionDeps) -> Corre
 
 
 def _sdk_locality(request: CorrectionRequest, environ: Mapping[str, str]) -> str:
-    return request.locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY") or "remote"
+    from tools import env_value
+    return request.locality or env_value(environ, "AI_LOCALITY") or "remote"
 
 
 def _host_provider_conflicts(request: CorrectionRequest, environ: Mapping[str, str]) -> bool:
-    selected = request.provider if request.provider not in (None, "auto") else environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER")
+    from tools import env_value
+    selected = request.provider if request.provider not in (None, "auto") else env_value(environ, "CORRECT_PROVIDER")
     conflict = bool(request.host and selected and selected != "auto" and selected != request.host)
     if conflict:
         print("explicit host conflicts with correction provider", file=sys.stderr)
@@ -750,13 +754,14 @@ def _host_provider_conflicts(request: CorrectionRequest, environ: Mapping[str, s
 
 def _ready_settings(settings: CorrectionSettings, request: CorrectionRequest,
                     deps: CorrectionDeps) -> tuple[CorrectionSettings, str | None, int | None]:
+    from tools import env_value
     known = {"none", "claude-code", "codex", "openclaw", "openai", "local"}
     if settings.provider not in known:
         print("unknown correction provider", file=sys.stderr)
         return settings, None, 2
     explicit = bool((request.provider and request.provider != "auto") or
-                    (deps.environ.get("VIDEO_ANALYSIS_CORRECT_PROVIDER") not in (None, "auto")))
-    explicit_local = request.locality == "local" or deps.environ.get("VIDEO_ANALYSIS_AI_LOCALITY") == "local"
+                    (env_value(deps.environ, "CORRECT_PROVIDER") not in (None, "auto")))
+    explicit_local = request.locality == "local" or env_value(deps.environ, "AI_LOCALITY") == "local"
     if settings.provider == "local" and (not settings.base_url or settings.locality != "local" or not explicit_local):
         print("local provider requires a base URL and explicit local locality", file=sys.stderr)
         return settings, None, 2
@@ -1232,7 +1237,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("video", type=Path, help="video whose .analysis transcript should be corrected")
     parser.add_argument("--language", default="auto", help="speech language (default: auto)")
     parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openclaw", "openai", "local"),
-                        help="correction provider (default: VIDEO_ANALYSIS_CORRECT_PROVIDER or auto)")
+                        help="correction provider (default: VIDEO_DIGEST_CORRECT_PROVIDER; deprecated alias: VIDEO_ANALYSIS_CORRECT_PROVIDER)")
     parser.add_argument("--host", choices=("claude-code", "codex", "openclaw"), help="AI host supplying model routing")
     parser.add_argument("--model", help="correction model override (default: provider-specific cheap model)")
     parser.add_argument("--retry-refused", action="store_true", help="retry only previously refused chunks")

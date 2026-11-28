@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 
 from host_models import ConfigReader
+from tools import env_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,8 +140,9 @@ def run_prepare(video: Path, request: SheetPrepareRequest | None = None,
         from host_models import ExplicitInput, resolve_host_model
         from tools import media_source_kind
         from correct_transcript import consent_required
+        locality = request.locality if request.locality is not None else env_value(deps.environ, "HOST_AI")
         host = resolve_host_model(deps.environ, _config_reader(deps),
-                                  ExplicitInput(request.host, request.locality))
+                                  ExplicitInput(request.host, locality))
         model = host.default_model or "host default"
         locality = host.locality
         language, _ = _resolved_language(request.language, bundle)

@@ -22,8 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CHECKS=145
-FULL_CHECKS=147
+DEFAULT_CHECKS=148
+FULL_CHECKS=150
 CHILD_OUTPUT: list[str] = []
 LAST_EXTRACT_OUTPUT = ""
 CHECK_OUTPUTS: dict[str, str] = {}
@@ -113,6 +113,85 @@ def check_ytdlp_module_resolution() -> bool:
             and module.version == "test-version" and calls == ["yt_dlp"]
             and overridden is not None and overridden.path == "custom-ytdlp"
             and overridden.origin == "env")
+
+
+def check_video_digest_env_precedence() -> bool:
+    from tools import app_temp_path, env_value, resolve_ffmpeg, resolve_ytdlp
+    suffixes = ("AI_LOCALITY", "CORRECT_MODEL", "CORRECT_PROVIDER", "FFMPEG",
+                "HOST", "HOST_AI", "TEMP_DIR", "YTDLP")
+    both = {f"VIDEO_DIGEST_{suffix}": f"primary-{suffix}" for suffix in suffixes}
+    both.update({f"VIDEO_ANALYSIS_{suffix}": f"legacy-{suffix}" for suffix in suffixes})
+    if any(env_value(both, suffix) != f"primary-{suffix}" for suffix in suffixes):
+        return False
+    empty = {"VIDEO_DIGEST_CORRECT_MODEL": "", "VIDEO_ANALYSIS_CORRECT_MODEL": "legacy"}
+    if env_value(empty, "CORRECT_MODEL", "default") != "":
+        return False
+    import correct_transcript as correction
+    settings = correction._resolve_settings(correction.CorrectionRequest(), correction.CorrectionDeps({
+        "VIDEO_DIGEST_CORRECT_PROVIDER": "openai", "VIDEO_ANALYSIS_CORRECT_PROVIDER": "local",
+        "VIDEO_DIGEST_CORRECT_MODEL": "primary-model", "VIDEO_ANALYSIS_CORRECT_MODEL": "legacy-model",
+        "VIDEO_DIGEST_HOST_AI": "local"}, config_reader=SimpleNamespace(
+            cwd=Path("."), home=Path("."), read_text=lambda _: None)))
+    from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    from tools import resolve_ytdlp
+    host = resolve_host_model({"VIDEO_DIGEST_HOST": "codex", "VIDEO_ANALYSIS_HOST": "claude-code"},
+        ConfigReader(Path("."), Path("."), lambda _: None), ExplicitInput())
+    local_host_ai = resolve_host_model({"CODEX_SESSION_ID": "x", "VIDEO_DIGEST_HOST_AI": "local"},
+        ConfigReader(Path("."), Path("."), lambda _: None), ExplicitInput(locality=env_value(
+            {"VIDEO_DIGEST_HOST_AI": "local"}, "HOST_AI")))
+    sdk_locality = correction._sdk_locality(correction.CorrectionRequest(),
+        {"VIDEO_DIGEST_HOST_AI": "local", "VIDEO_ANALYSIS_AI_LOCALITY": "remote"})
+    from prepare_sheet import run_prepare
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        video, analysis, (request, deps) = _prepare_case(Path(temp))
+        deps = replace(deps, environ={"VIDEO_DIGEST_HOST_AI": "local",
+                                      "ANTHROPIC_MODEL": "claude-sonnet-test"})
+        sheet_result = run_prepare(video, request, deps)
+        sheet_manifest = json.loads((analysis / "manifest.json").read_text(encoding="utf-8"))
+    temp = app_temp_path({"VIDEO_DIGEST_TEMP_DIR": str(Path.cwd()), "VIDEO_ANALYSIS_TEMP_DIR": "."})
+    ffmpeg = resolve_ffmpeg(env={"VIDEO_DIGEST_FFMPEG": "primary", "VIDEO_ANALYSIS_FFMPEG": "legacy"},
+                            which=lambda _: None, imageio_lookup=lambda: "bundled")
+    ytdlp = resolve_ytdlp(env={"VIDEO_DIGEST_YTDLP": "primary", "VIDEO_ANALYSIS_YTDLP": "legacy"},
+                          which=lambda _: None)
+    runtime_files = ("correct_transcript.py", "host_models.py", "prepare_sheet.py", "setup_tools.py", "analyze_video.py")
+    direct_lookup = re.compile(r'\.get\(["\']VIDEO_(?:DIGEST|ANALYSIS)_')
+    source_guard = all(not direct_lookup.search((HERE / name).read_text(encoding="utf-8"))
+                       for name in runtime_files)
+    return (host.host == "codex" and local_host_ai.locality == "local" and sdk_locality == "remote"
+            and (settings.provider, settings.model, settings.locality) == ("openai", "primary-model", "remote")
+            and temp == Path.cwd() and ffmpeg.path == "primary" and ytdlp.path == "primary"
+            and sheet_result == 0
+            and sheet_manifest["params"]["sheet_prepare"]["locality"] == "local"
+            and source_guard)
+
+
+def check_legacy_video_analysis_env_fallback() -> bool:
+    from tools import app_temp_path, env_value, resolve_ffmpeg, resolve_ytdlp
+    suffixes = ("AI_LOCALITY", "CORRECT_MODEL", "CORRECT_PROVIDER", "FFMPEG",
+                "HOST", "HOST_AI", "TEMP_DIR", "YTDLP")
+    legacy = {f"VIDEO_ANALYSIS_{suffix}": f"legacy-{suffix}" for suffix in suffixes}
+    if any(env_value(legacy, suffix) != f"legacy-{suffix}" for suffix in suffixes):
+        return False
+    from host_models import ConfigReader, ExplicitInput, resolve_host_model
+    host = resolve_host_model({"VIDEO_ANALYSIS_HOST": "codex"},
+        ConfigReader(Path("."), Path("."), lambda _: None), ExplicitInput())
+    temp_root = Path.cwd() / ".legacy-temp"
+    temp = app_temp_path({"VIDEO_ANALYSIS_TEMP_DIR": str(temp_root)})
+    ffmpeg = resolve_ffmpeg(env={"VIDEO_ANALYSIS_FFMPEG": "legacy"}, which=lambda _: None,
+                            imageio_lookup=lambda: "bundled")
+    ytdlp = resolve_ytdlp(env={"VIDEO_ANALYSIS_YTDLP": "legacy"}, which=lambda _: None)
+    return host.host == "codex" and temp == temp_root and ffmpeg.path == "legacy" and ytdlp.path == "legacy"
+
+
+def check_analyze_video_forwards_openclaw_provider() -> bool:
+    import analyze_video
+    calls = []
+    with patch.object(analyze_video, "extract_main", return_value=0), \
+            patch.object(analyze_video, "correct_main", side_effect=lambda argv: calls.append(argv) or 0), \
+            patch.object(analyze_video, "bundle_main", return_value=0), \
+            contextlib.redirect_stderr(io.StringIO()):
+        code = analyze_video.main(["talk.mp4", "--provider", "openclaw"])
+    return code == 0 and calls == [["talk.mp4", "--provider", "openclaw"]]
 
 
 def check_setup_plan() -> bool:
@@ -3266,7 +3345,7 @@ def check_v065_documentation_and_release_contract() -> bool:
             if not match:
                 return False
             values.append(match.group(1))
-        count_pins.append(len(set(values)) == 1)
+        count_pins.append(len(set(values[:3])) == 1 and int(values[3]) == int(values[0]) + 3)
     return all((release_contract, comments, language, migration, facts_cost,
                 editorial, structure, extraction_updates, release_measurement,
                 transcript_contract, sheets_contract, no_ocr_reuse_claim, *count_pins))
@@ -3921,6 +4000,12 @@ def main() -> int:
             "refusal escalation follows family table", check_refusal_escalation_follows_family_table)
         checks["setup reports resolved host readiness without secrets"] = run_check(
             "setup reports resolved host readiness without secrets", check_setup_reports_resolved_host_readiness_without_secrets)
+        checks["VIDEO_DIGEST environment names override deprecated aliases"] = run_check(
+            "VIDEO_DIGEST environment names override deprecated aliases", check_video_digest_env_precedence)
+        checks["deprecated VIDEO_ANALYSIS environment aliases remain accepted"] = run_check(
+            "deprecated VIDEO_ANALYSIS environment aliases remain accepted", check_legacy_video_analysis_env_fallback)
+        checks["analyze_video forwards openclaw provider"] = run_check(
+            "analyze_video forwards openclaw provider", check_analyze_video_forwards_openclaw_provider)
         checks["analyze_video forwards explicit host"] = run_check(
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(

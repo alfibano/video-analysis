@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
+from tools import env_value
+
 
 @dataclass(frozen=True, slots=True)
 class HostModel:
@@ -65,8 +67,9 @@ def _read(reader: ConfigReader, path: Path) -> str | None:
 def _host(environ: Mapping[str, str], explicit: ExplicitInput) -> tuple[str, str]:
     if explicit.host:
         return explicit.host.strip().lower(), "selected by explicit host input"
-    if environ.get("VIDEO_ANALYSIS_HOST"):
-        return environ["VIDEO_ANALYSIS_HOST"].strip().lower(), "selected by VIDEO_ANALYSIS_HOST"
+    configured = env_value(environ, "HOST")
+    if configured:
+        return configured.strip().lower(), "selected by product HOST setting"
     if environ.get("CLAUDECODE"):
         return "claude-code", "detected from Claude Code marker"
     if environ.get("CODEX_SESSION_ID") or environ.get("CODEX_THREAD_ID"):
@@ -339,7 +342,7 @@ def model_sibling(provider: str, model: str | None, sibling: str) -> str | None:
 
 
 def _locality(environ: Mapping[str, str], explicit: ExplicitInput, provider: str) -> tuple[str, str]:
-    declared = explicit.locality or environ.get("VIDEO_ANALYSIS_AI_LOCALITY")
+    declared = explicit.locality or env_value(environ, "AI_LOCALITY")
     if declared:
         value = "local" if declared.lower() == "local" else "remote"
         return value, "explicit locality declaration" if declared.lower() in {"local", "remote"} else "invalid locality defaults to remote"
