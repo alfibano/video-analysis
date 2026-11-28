@@ -1858,6 +1858,7 @@ def check_bundle_sponsors() -> bool:
 
 
 def check_ocr_key_frames() -> bool:
+    from PIL import Image
     from ocr import ocr_key_frames
     seen = []
     class FakeOutput:
@@ -1867,12 +1868,92 @@ def check_ocr_key_frames() -> bool:
         def __call__(self, frame):
             seen.append(frame)
             return FakeOutput()
-    results = ocr_key_frames([("a.jpg", Path("a.jpg"))], lambda: FakeEngine())
-    class EmptyOutput:
-        txts = None
-        scores = None
-    empty = ocr_key_frames([("c.jpg", Path("c.jpg"))], lambda: lambda _: EmptyOutput())
-    return seen == [Path("a.jpg")] and results == {"a.jpg": "Résumé"} and empty == {"c.jpg": ""}
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        image = Path(temp) / "frame.png"
+        Image.new("RGB", (320, 180), "white").save(image)
+        results = ocr_key_frames([("a.jpg", image)], lambda: FakeEngine())
+        class EmptyOutput:
+            txts = None
+            scores = None
+        empty = ocr_key_frames([("c.jpg", image)], lambda: lambda _: EmptyOutput())
+    return seen == [image] and results == {"a.jpg": "Résumé"} and empty == {"c.jpg": ""}
+
+
+def check_ocr_similarity_reuse_and_small_text_change() -> bool:
+    from PIL import Image, ImageDraw
+    from ocr import OCR_COMPARE_SIZE, OCR_REUSE_ALGORITHM, OCR_REUSE_RMSE, ocr_key_frames_with_stats
+
+    class FakeEngine:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _image):
+            self.calls += 1
+            return SimpleNamespace(txts=[f"text-{self.calls}"], scores=[0.9])
+
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        base = Image.new("L", OCR_COMPARE_SIZE, 240)
+        base.save(root / "base.png")
+        base.save(root / "identical.png")
+        noise = Image.new("L", OCR_COMPARE_SIZE)
+        noise.putdata([239 if index % 2 else 241
+                       for index in range(OCR_COMPARE_SIZE[0] * OCR_COMPARE_SIZE[1])])
+        noise.save(root / "noise.png")
+        Image.new("L", OCR_COMPARE_SIZE, 242).save(root / "drift-one.png")
+        Image.new("L", OCR_COMPARE_SIZE, 244).save(root / "drift-two.png")
+        changed = base.copy()
+        ImageDraw.Draw(changed).rectangle((10, 10, 21, 13), fill=0)
+        changed.save(root / "changed.png")
+        engine = FakeEngine()
+        output = io.StringIO()
+        result = ocr_key_frames_with_stats(
+            [(name, root / f"{name}.png") for name in
+             ("base", "identical", "noise", "drift-one", "drift-two", "changed")],
+            lambda: engine, stream=output)
+
+    return (OCR_COMPARE_SIZE == (320, 180) and OCR_REUSE_RMSE == 0.01
+            and OCR_REUSE_ALGORITHM == "gray-rmse-320x180-v1"
+            and result.texts == {"base": "text-1", "identical": "text-1", "noise": "text-1",
+                                 "drift-one": "text-1", "drift-two": "text-2", "changed": "text-3"}
+            and result.reused == 3 and engine.calls == 3
+            and "OCR 6/6" in output.getvalue())
+
+
+def check_bundle_records_ocr_reuse_count() -> bool:
+    import build_bundle
+    from build_bundle import BundleResult, SpeechRead
+    from bundle import FrameAssignment
+
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        work = Path(temp)
+        inputs = SimpleNamespace(work=work, manifest={"params": {"extract": {}}},
+                                 frames={"frame.jpg": 1.0}, keyframes=["frame.jpg"])
+        result = BundleResult([], [FrameAssignment("frame.jpg", 1.0, 0, True)],
+                              SpeechRead([], None, None, "whisper"), {}, [], {}, 0)
+        args = SimpleNamespace(skip_ocr=False, ocr_min_score=0.5)
+        with patch("ocr.ocr_key_frames_with_stats",
+                   return_value=SimpleNamespace(texts={"frame.jpg": "text"}, reused=1)):
+            result = build_bundle._with_ocr(inputs, result, args)
+        with patch.object(build_bundle, "_ocr_version", return_value="test"):
+            params = build_bundle._bundle_params(
+                SimpleNamespace(skip_ocr=False, language=None, ocr_min_score=0.5,
+                                min_chapter=30, max_chapter=300, target_chapter=120))
+        report = io.StringIO()
+        with contextlib.redirect_stdout(report):
+            build_bundle._write_bundle(inputs, result, params, {})
+            build_bundle._report_bundle(inputs, result, "whisper")
+        manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
+        skipped = build_bundle._bundle_params(
+            SimpleNamespace(skip_ocr=True, language=None, ocr_min_score=0.5,
+                            min_chapter=30, max_chapter=300, target_chapter=120))
+    return (manifest["params"]["bundle"] == params
+            and params["ocr_reuse_algorithm"] == "gray-rmse-320x180-v1"
+            and params["ocr_reuse_threshold"] == 0.01
+            and manifest["stages"]["bundle"]["ocr_reused"] == 1
+            and "OCR reused 1" in report.getvalue()
+            and skipped["ocr_reuse_algorithm"] is None
+            and skipped["ocr_reuse_threshold"] is None)
 
 
 def check_ocr_is_lazy() -> bool:
@@ -1898,27 +1979,31 @@ def check_ocr_thread_tuning_and_progress() -> bool:
     class FakeEngine:
         def __call__(self, _):
             return SimpleNamespace(txts=["text"], scores=[0.9])
-    frames = [(f"f{i}.jpg", Path(f"f{i}.jpg")) for i in range(10)]
-    class FakeRapidOCR:
-        def __init__(self, *, params: dict[str, object]):
-            self.params = params
-        def __call__(self, _):
-            return SimpleNamespace(txts=["text"], scores=[0.9])
-    with patch.dict(sys.modules, {"rapidocr": SimpleNamespace(RapidOCR=FakeRapidOCR)}):
-        with patch("ocr.os.cpu_count", return_value=8):
-            configured = KeyFrameOcr()._get_engine().params
-    output = io.StringIO()
-    now = [0.0]
-    result = ocr_key_frames(frames, lambda: FakeEngine(), stream=output,
-                            monotonic=lambda: now[0])
-    tty_output = io.StringIO()
-    tty_output.isatty = lambda: True
-    clock = [0.0]
-    def advance_clock() -> float:
-        clock[0] += 0.5
-        return clock[0]
-    ocr_key_frames(frames, lambda: FakeEngine(), stream=tty_output, monotonic=advance_clock)
-    tty_updates = tty_output.getvalue().count("\r")
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        image = Path(temp) / "frame.png"
+        from PIL import Image
+        Image.new("RGB", (320, 180), "white").save(image)
+        frames = [(f"f{i}.jpg", image) for i in range(10)]
+        class FakeRapidOCR:
+            def __init__(self, *, params: dict[str, object]):
+                self.params = params
+            def __call__(self, _):
+                return SimpleNamespace(txts=["text"], scores=[0.9])
+        with patch.dict(sys.modules, {"rapidocr": SimpleNamespace(RapidOCR=FakeRapidOCR)}):
+            with patch("ocr.os.cpu_count", return_value=8):
+                configured = KeyFrameOcr()._get_engine().params
+        output = io.StringIO()
+        now = [0.0]
+        result = ocr_key_frames(frames, lambda: FakeEngine(), stream=output,
+                                monotonic=lambda: now[0])
+        tty_output = io.StringIO()
+        tty_output.isatty = lambda: True
+        clock = [0.0]
+        def advance_clock() -> float:
+            clock[0] += 0.5
+            return clock[0]
+        ocr_key_frames(frames, lambda: FakeEngine(), stream=tty_output, monotonic=advance_clock)
+        tty_updates = tty_output.getvalue().count("\r")
     return (counts == {None: 1, 1: 1, 14: 7, 20: 8, 64: 8}
             and configured == {"Global.log_level": "warning",
                                "EngineConfig.onnxruntime.intra_op_num_threads": 4}
@@ -2297,9 +2382,10 @@ def check_transient_key_frames_are_not_ocrd() -> bool:
                 frames=frames, keyframes=["a.jpg", "b.jpg", "c.jpg"], work=Path("."))
     assignments = [FrameAssignment(name, pts, 0, True) for name, pts in frames.items()]
     seen = []
-    with patch("ocr.ocr_key_frames", side_effect=lambda values, **kwargs: seen.extend(values) or {values[0][0]: "text"}):
-        texts, ocr_frames, skipped = build_bundle.run_ocr(inputs, assignments,
-                                                           SimpleNamespace(skip_ocr=False, ocr_min_score=0.5))
+    with patch("ocr.ocr_key_frames_with_stats", side_effect=lambda values, **kwargs:
+               seen.extend(values) or SimpleNamespace(texts={values[0][0]: "text"}, reused=0)):
+        texts, ocr_frames, skipped, reused = build_bundle.run_ocr(
+            inputs, assignments, SimpleNamespace(skip_ocr=False, ocr_min_score=0.5))
     adaptive_skips, window = build_bundle.transient_key_frames(
         frames, inputs.keyframes, {"sampling_mode": "adaptive", "sampling_fps": 1})
     fixed_skips, fixed_window = build_bundle.transient_key_frames(
@@ -2317,7 +2403,7 @@ def check_transient_key_frames_are_not_ocrd() -> bool:
         SimpleNamespace(skip_ocr=True, language="auto", ocr_min_score=0.5,
                         min_chapter=30, max_chapter=600, target_chapter=300),
         {"sampling_mode": "adaptive", "sampling_fps": 1})
-    return (len(seen) == 1 and seen[0][0] == "frames/c.jpg" and len(ocr_frames) == 1
+    return (len(seen) == 1 and seen[0][0] == "frames/c.jpg" and len(ocr_frames) == 1 and reused == 0
             and skipped == {"frames/a.jpg": "transient", "frames/b.jpg": "transient"}
             and texts == {"frames/c.jpg": "text"} and adaptive_skips == {"a.jpg", "b.jpg"}
             and window == 1.05 and not fixed_skips and fixed_window is None
@@ -3788,6 +3874,11 @@ def main() -> int:
         checks["sponsor spans remain flagged and summary text excludes them"] = run_check(
             "sponsor spans remain flagged and summary text excludes them", check_bundle_sponsors)
         checks["OCR runs on key frames only"] = run_check("OCR runs on key frames only", check_ocr_key_frames)
+        checks["OCR reuses unchanged frames but rescans small text changes"] = run_check(
+            "OCR reuses unchanged frames but rescans small text changes",
+            check_ocr_similarity_reuse_and_small_text_change)
+        checks["bundle manifest records OCR reuse count"] = run_check(
+            "bundle manifest records OCR reuse count", check_bundle_records_ocr_reuse_count)
         checks["OCR adapter is lazy"] = run_check("OCR adapter is lazy", check_ocr_is_lazy)
         checks["setup reports correction readiness without secrets"] = run_check(
             "setup reports correction readiness without secrets", check_setup_reports_correction_readiness_without_secrets)
