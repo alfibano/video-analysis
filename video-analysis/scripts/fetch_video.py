@@ -89,14 +89,35 @@ def refuse_unsupported(info: dict[str, Any]) -> None:
         raise UnsupportedVideo("live and upcoming broadcasts are not supported")
 
 
+def ordered_unique(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.casefold()
+        if key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
+
+
+def caption_language_candidates(info: Mapping[str, Any]) -> list[str]:
+    """The video language, its base tag and YouTube's '-orig' variant (fr-FR -> fr-FR, fr, fr-orig)."""
+    language = info.get("language") or info.get("language_code")
+    if not isinstance(language, str) or not language:
+        return []
+    base = language.split("-", 1)[0]
+    return ordered_unique([language, base, f"{base}-orig"])
+
+
+def default_subtitle_languages(info: Mapping[str, Any]) -> list[str]:
+    return ordered_unique([*caption_language_candidates(info), "en"])
+
+
 def build_ydl_options(dest: Path, info: dict[str, Any] | None = None,
                       sub_langs: list[str] | None = None) -> dict[str, Any]:
     languages = sub_langs
     if languages is None:
-        language = (info or {}).get("language") or (info or {}).get("language_code")
-        languages = [language] if language else []
-        if "en" not in languages:
-            languages.append("en")
+        languages = default_subtitle_languages(info or {})
     ffmpeg = resolve_ffmpeg()
     js_runtime = resolve_js_runtime()
     options: dict[str, Any] = {
@@ -250,19 +271,7 @@ def write_context(video: Path, info: dict[str, Any], ydl: Any, fetch_params: dic
     (work / "sponsorblock.json").write_text(
         _bounded_json(info.get("sponsorblock_chapters") or []), encoding="utf-8")
 
-    requested_subtitles = info.get("requested_subtitles") or {}
-    for subtitle in requested_subtitles.values():
-        source = subtitle.get("filepath") if isinstance(subtitle, dict) else None
-        if source:
-            source_path = Path(source)
-            if source_path.is_file() and source_path.resolve() != (work / source_path.name).resolve():
-                shutil.move(str(source_path), str(work / source_path.name))
-    # Also collect sidecar captions produced by versions that omit requested_subtitles paths.
-    for source_path in video.parent.glob(f"{video.stem}*.??*"):
-        if source_path.suffix.lower() in SUBTITLE_SUFFIXES and source_path.parent != work:
-            target = work / source_path.name
-            if not target.exists():
-                shutil.move(str(source_path), str(target))
+    _move_subtitle_sidecars(video, work, info)
 
     stat = video.stat()
     identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
@@ -325,12 +334,7 @@ def _existing_fetch(dest: Path, stem: str, url: str,
 
 
 def _resume_comments(work: Path, video: Path, manifest: dict[str, Any], url: str, limit: int,
-                     factory: Callable[[dict[str, Any]], Any],
-                     sub_langs: list[str]) -> int:
-    fetch_params = manifest.get("params", {}).get("fetch", {})
-    if isinstance(fetch_params, Mapping) and fetch_params.get("sub_langs") != sub_langs:
-        print("fetch conflict: requested subtitle languages differ from the existing fetch")
-        return 3
+                     factory: Callable[[dict[str, Any]], Any]) -> int:
     params = {"limit": limit, "sort": "top"}
     old_params = manifest.get("params", {}).get("comments")
     stage = manifest.get("stages", {}).get("comments")
@@ -346,6 +350,82 @@ def _resume_comments(work: Path, video: Path, manifest: dict[str, Any], url: str
     (work / "manifest.json").write_text(_bounded_json(manifest), encoding="utf-8")
     if warning:
         print(f"WARNING: comments unavailable ({warning})")
+    return 0
+
+
+def _ordered_subset(values: list[str], candidates: list[str]) -> bool:
+    positions = {value.casefold(): index for index, value in enumerate(candidates)}
+    last = -1
+    for value in values:
+        index = positions.get(value.casefold(), -1)
+        if index <= last:
+            return False
+        last = index
+    return True
+
+
+def _has_matching_caption(saved: object, info: Mapping[str, Any]) -> bool:
+    candidates = {language.casefold() for language in caption_language_candidates(info)}
+    return isinstance(saved, list) and any(
+        isinstance(language, str) and language.casefold() in candidates for language in saved)
+
+
+def _move_subtitle_sidecars(video: Path, work: Path, info: Mapping[str, Any]) -> None:
+    subtitles = info.get("requested_subtitles") or {}
+    sources = [Path(str(item["filepath"])) for item in subtitles.values()
+               if isinstance(item, Mapping) and item.get("filepath")]
+    sources.extend(path for path in video.parent.glob(f"{video.stem}*.??*")
+                   if path.suffix.lower() in SUBTITLE_SUFFIXES)
+    for source in sources:
+        if source.is_file() and source.resolve() != (work / source.name).resolve():
+            target = work / source.name
+            if not target.exists():
+                shutil.move(str(source), str(target))
+
+
+def _refresh_subtitle_artifacts(work: Path, video: Path, manifest: dict[str, Any], url: str,
+                                info: Mapping[str, Any], requested: list[str],
+                                factory: Callable[[dict[str, Any]], Any]) -> None:
+    subtitle_info: dict[str, Any] = {}
+    try:
+        with factory(build_subtitle_options(video.parent, requested, dict(info))) as ydl:
+            subtitle_info = download_video(url, ydl)
+            sanitized = ydl.sanitize_info(subtitle_info)
+    except Exception as error:
+        print(f"WARNING: subtitle refresh failed ({' '.join(str(error).split())[:160]})")
+        sanitized = {}
+    subtitle_info, status = subtitle_result(subtitle_info, requested, video.parent, video)
+    _move_subtitle_sidecars(video, work, subtitle_info)
+    raw_path = work / "raw_info.json"
+    raw_info = json.loads(raw_path.read_text(encoding="utf-8")) if raw_path.is_file() else {}
+    sanitized = dict(sanitized) if isinstance(sanitized, Mapping) else {}
+    raw_info["requested_subtitles"] = sanitized.get("requested_subtitles") or subtitle_info.get("requested_subtitles") or {}
+    raw_info.pop("comments", None)
+    raw_path.write_text(_bounded_json(raw_info), encoding="utf-8")
+    manifest["params"]["fetch"]["sub_langs"] = requested
+    manifest["stages"]["fetch"]["subtitles"].update(status)
+    (work / "manifest.json").write_text(_bounded_json(manifest), encoding="utf-8")
+
+
+def _resume_subtitles(work: Path, video: Path, manifest: dict[str, Any], url: str,
+                      info: Mapping[str, Any], requested: list[str], explicit: bool,
+                      factory: Callable[[dict[str, Any]], Any]) -> int:
+    params = manifest.setdefault("params", {}).setdefault("fetch", {})
+    old_languages = params.get("sub_langs", [])
+    if not isinstance(old_languages, list):
+        old_languages = []
+    defaults = default_subtitle_languages(info)
+    if explicit and old_languages != requested:
+        print("fetch conflict: requested subtitle languages differ from the existing fetch")
+        return 3
+    if not explicit and old_languages != requested and not _ordered_subset(old_languages, defaults):
+        print("fetch conflict: requested subtitle languages differ from the existing fetch")
+        return 3
+    subtitle_stage = manifest.setdefault("stages", {}).setdefault("fetch", {}).setdefault("subtitles", {})
+    saved = subtitle_stage.get("saved", []) if isinstance(subtitle_stage, Mapping) else []
+    if old_languages == requested and _has_matching_caption(saved, info):
+        return 0
+    _refresh_subtitle_artifacts(work, video, manifest, url, info, requested, factory)
     return 0
 
 
@@ -367,7 +447,7 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
     parser.add_argument("--dest", type=Path, default=Path("."),
                         help="folder for the downloaded video (default: %(default)s)")
     parser.add_argument("--sub-langs", nargs="+", metavar="LANG",
-                        help="subtitle languages to save (default: the video's language and en)")
+                        help="subtitle languages to save (default: video language variants and en)")
     parser.add_argument("--comments", type=int, default=MAX_COMMENTS, metavar="N",
                         help="save at most N top-level comments (0 to disable; maximum 100)")
     try:
@@ -393,12 +473,14 @@ def main(argv: list[str] | None = None, *, ydl_factory: Callable[[dict[str, Any]
             return 3
         if existing is not None:
             work, video, manifest = existing
-            requested_languages = build_ydl_options(args.dest.resolve(), preflight_info,
-                                                    args.sub_langs)["subtitleslangs"]
+            requested_languages = (args.sub_langs if args.sub_langs is not None
+                                   else default_subtitle_languages(preflight_info))
             if on_video is not None:
                 on_video(video)
-            code = _resume_comments(work, video, manifest, args.url, args.comments, factory,
-                                    requested_languages)
+            code = _resume_subtitles(work, video, manifest, args.url, preflight_info,
+                                     requested_languages, args.sub_langs is not None, factory)
+            if code == 0:
+                code = _resume_comments(work, video, manifest, args.url, args.comments, factory)
             if code == 0:
                 print(f"FETCHED: {video}")
                 print(f"WORK FOLDER: {work}")

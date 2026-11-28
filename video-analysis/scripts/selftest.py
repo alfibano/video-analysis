@@ -204,7 +204,7 @@ def check_fetch_manifest() -> bool:
 
         def extract_info(self, url: str, *, download: bool):
             calls.append(download)
-            if download:
+            if download and not self.options.get("skip_download"):
                 video = dest / video_name
                 video.write_bytes(b"fake video")
                 info["requested_downloads"] = [{"filepath": str(video)}]
@@ -232,9 +232,12 @@ def check_fetch_manifest() -> bool:
     else:
         different_id_refused = False
     retry_calls = len(calls)
+    retry_options = len(option_sets)
     retry_code = fetch_video.main(["https://youtu.be/test-id?si=OTHER", "--dest", str(dest)],
                                   ydl_factory=FakeYDL)
-    retry_ok = retry_code == 0 and calls[retry_calls:] == [False]
+    retry_options = option_sets[retry_options:]
+    retry_ok = (retry_code == 0 and calls[retry_calls:] == [False, True]
+                and len(retry_options) == 2 and retry_options[1].get("skip_download") is True)
     conflict_output = io.StringIO()
     with contextlib.redirect_stdout(conflict_output):
         subtitle_conflict = fetch_video.main(["https://example.invalid/video", "--dest", str(dest),
@@ -342,7 +345,7 @@ def check_comments_fetch() -> bool:
         def __exit__(self, *_): return None
         def extract_info(self, url, *, download=True):
             calls.append((self.opts, download))
-            if download:
+            if download and not self.opts.get("skip_download"):
                 video.parent.mkdir(parents=True, exist_ok=True); video.write_bytes(b"v")
                 info["requested_downloads"] = [{"filepath": str(video)}]
             if self.opts.get("getcomments"):
@@ -373,7 +376,7 @@ def check_comments_fetch() -> bool:
     old_params, old_stages = json.loads(json.dumps(legacy["params"])), json.loads(json.dumps(legacy["stages"]))
     (folder / "comments.json").unlink()
     (folder / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
-    old_downloads = sum(download for _, download in calls)
+    old_downloads = sum(download and not opts.get("skip_download") for opts, download in calls)
     old_comment_passes = after
     upgrade = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "2"],
                                ydl_factory=FakeYDL)
@@ -385,7 +388,7 @@ def check_comments_fetch() -> bool:
             and "SECRET" not in raw and "comments" not in json.loads(raw) and after == before
             and upgraded["params"] == {**old_params, "comments": {"limit": 2, "sort": "top"}}
             and upgraded["stages"] == {**old_stages, "comments": {"status": "done", "output": "comments.json", "count": 1}}
-            and sum(download for _, download in calls) == old_downloads
+            and sum(download and not opts.get("skip_download") for opts, download in calls) == old_downloads
             and sum(bool(opts.get("getcomments")) for opts, _ in calls) == old_comment_passes + 1)
 
 
@@ -409,6 +412,93 @@ def check_comments_states() -> bool:
             and disabled_warning is None and unavailable == {"status": "unavailable", "count": 0,
             "reason": "offline failure"} and warning == "offline failure"
             and fetch_video.sanitize_comments({"comments": []}, 0) == [])
+
+
+def check_caption_language_expansion_and_fetch_resume() -> bool:
+    import fetch_video
+    from tools import make_temp_folder
+
+    dest = make_temp_folder("caption-resume-")
+    info = {"_type": "video", "id": "caption-id", "extractor_key": "Youtube",
+            "title": "Caption resume", "language": "fr-FR", "webpage_url": "https://example.invalid/video"}
+    video = dest / f"{fetch_video.safe_video_stem(info['title'], info['id'])}.mp4"
+    option_sets: list[dict] = []
+    downloads = 0
+
+    class FakeYDL:
+        def __init__(self, options: dict) -> None:
+            self.options = options
+            option_sets.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def extract_info(self, url: str, *, download: bool):
+            nonlocal downloads
+            if download and not self.options.get("skip_download"):
+                downloads += 1
+                video.write_bytes(b"caption video")
+                info["requested_downloads"] = [{"filepath": str(video)}]
+            if self.options.get("writesubtitles"):
+                caption = dest / f"{video.stem}.fr.vtt"
+                caption.write_text("WEBVTT\n", encoding="utf-8")
+                info["requested_subtitles"] = {"fr": {"filepath": str(caption)}}
+            return info
+
+        def sanitize_info(self, value: dict) -> dict:
+            return value
+
+        def prepare_filename(self, value: dict) -> str:
+            return str(video)
+
+    if fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "0"],
+                        ydl_factory=FakeYDL) != 0:
+        return False
+    work = dest / f"{video.stem}.analysis"
+    manifest_path = work / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["unrelated"] = {"preserve": True}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    explicit = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "0",
+                                 "--sub-langs", "es"], ydl_factory=FakeYDL)
+    manifest["params"]["fetch"]["sub_langs"] = ["fr-FR", "en"]
+    manifest["stages"]["fetch"]["subtitles"] = {
+        "requested": ["fr-FR", "en"], "saved": ["en"], "missing": ["fr-FR"]}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = len(option_sets)
+    resumed = fetch_video.main(["https://example.invalid/video", "--dest", str(dest), "--comments", "0"],
+                               ydl_factory=FakeYDL)
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw_info = json.loads((work / "raw_info.json").read_text(encoding="utf-8"))
+    retry_manifest = json.loads(json.dumps(refreshed))
+    retry_manifest["stages"]["fetch"]["subtitles"]["saved"] = ["en"]
+    manifest_path.write_text(json.dumps(retry_manifest), encoding="utf-8")
+    retry_start = len(option_sets)
+    missing_caption_retry = fetch_video.main(
+        ["https://example.invalid/video", "--dest", str(dest), "--comments", "0"], ydl_factory=FakeYDL)
+    retry_options = option_sets[retry_start:]
+    calls = option_sets[before:]
+    return (fetch_video.default_subtitle_languages({"language": "fr-FR"}) == ["fr-FR", "fr", "fr-orig", "en"]
+            and fetch_video.default_subtitle_languages({"language": "fr"}) == ["fr", "fr-orig", "en"]
+            and fetch_video.default_subtitle_languages({"language": "en"}).count("en") == 1
+            and fetch_video.build_ydl_options(dest, sub_langs=["EN", "en"])["subtitleslangs"] == ["EN", "en"]
+            and resumed == 0 and explicit == 3 and missing_caption_retry == 0 and downloads == 1
+            and len(calls) == 4 and calls[1].get("skip_download") is True
+            and calls[1].get("subtitleslangs") == ["fr-FR", "fr", "fr-orig", "en"]
+            and len(retry_options) == 2 and retry_options[1].get("skip_download") is True
+            and (work / f"{video.stem}.fr.vtt").is_file()
+            and refreshed["params"]["fetch"]["sub_langs"] == ["fr-FR", "fr", "fr-orig", "en"]
+            and refreshed["stages"]["fetch"]["subtitles"] == {
+                "requested": ["fr-FR", "fr", "fr-orig", "en"], "saved": ["fr"],
+                "missing": ["fr-FR", "fr-orig", "en"]}
+            and refreshed["source"] == manifest["source"]
+            and refreshed["params"]["comments"] == manifest["params"]["comments"]
+            and refreshed["stages"]["comments"] == manifest["stages"]["comments"]
+            and refreshed["unrelated"] == {"preserve": True}
+            and raw_info.get("requested_subtitles") == info.get("requested_subtitles"))
 
 
 def check_analyze_video_comments() -> bool:
@@ -490,12 +580,13 @@ def check_subtitle_failure_is_best_effort() -> bool:
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
     subtitles = manifest["stages"]["fetch"]["subtitles"]
     return (result == 0 and video.is_file() and (work / "metadata.json").is_file()
-            and subtitles == {"requested": ["en"], "saved": [], "missing": ["en"]}
+            and subtitles == {"requested": ["en", "en-orig"], "saved": [],
+                              "missing": ["en", "en-orig"]}
             and len(option_sets) == 4 and "writesubtitles" not in option_sets[1]
             and "writeautomaticsub" not in option_sets[1] and "ignoreerrors" not in option_sets[1]
             and option_sets[2].get("ignoreerrors") is True
             and option_sets[3].get("getcomments") is True
-            and output.getvalue().startswith("WARNING: subtitles unavailable for en (HTTP Error 429"))
+            and output.getvalue().startswith("WARNING: subtitles unavailable for en, en-orig (HTTP Error 429"))
 
 
 def check_legacy_manifest() -> bool:
@@ -3311,6 +3402,9 @@ def main() -> int:
             "comments fetch is bounded private and independently resumable", check_comments_fetch)
         checks["comments disable and unavailable states are explicit"] = run_check(
             "comments disable and unavailable states are explicit", check_comments_states)
+        checks["caption language expansion and fetch resume are lossless"] = run_check(
+            "caption language expansion and fetch resume are lossless",
+            check_caption_language_expansion_and_fetch_resume)
         checks["analyze_video forwards bounded comments"] = run_check(
             "analyze_video forwards bounded comments", check_analyze_video_comments)
         checks["sheet schema accepts strict v2 and rejects unknown nested fields"] = run_check(
