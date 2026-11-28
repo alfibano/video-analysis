@@ -19,7 +19,7 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 | adaptive base grid and change margin | adaptive sampling keeps the base grid and one-second window around a scene change |
 | adaptive sampling and timestamp names | sampled JPEG names use rounded PTS milliseconds and remain in timestamp order |
 | fixed interval opt out | --fixed-interval keeps the five-second grid and sampling settings participate in resume checks |
-| 1 contact sheet | contact sheets are built |
+| contact sheets are opt-in | --contact-sheets creates sheets; default extraction omits them and can resume existing frames |
 | scene change detected (2 key frames) | key-frame detection keeps changes and drops duplicates |
 | exact frame at 00:00:12.250 | `--at` extracts a frame at an exact instant |
 | audio detected | the audio stream is found |
@@ -107,13 +107,15 @@ not required because ZIP metadata and relationship ordering vary.
 | Setup | `setup maps docx import to python-docx` |
 | Extraction | `key-sheet pages reuse matching contact sheets and are indexed`; verifies ordered page reuse and SHA-256 uniqueness across `keysheets/` and `sheets/` |
 | Cleanup | `selftest cleanup removes tracked folders and refuses outside paths`; verifies nested owned folders under a `TemporaryDirectory` are removed and an outside path triggers the guard |
-| Documentation | `v0.6.4 documentation extraction and measured-count contract` |
+| Documentation | `v0.6.5 documentation performance and measured-count contract` |
 
 The check named `default DOCX render has ordered content images and properties` also verifies that
 built-in-template hyperlink runs have visible formatting when no `Hyperlink` character style exists.
 Source links must match `bundle.json` and use a safe HTTP(S) URL; unsafe values remain plain text.
-Measured release totals: `DEFAULT_CHECKS=134` (134 passed, 0 failed); `FULL_CHECKS=136` result rows
-(the two full-mode transcription checks add to the default total).
+Measured release totals: `DEFAULT_CHECKS=145` (145 passed, 0 failed); `FULL_CHECKS=147`
+(147 passed, 0 failed; two full-mode transcription checks add to the default total).
+New v0.6.5 offline checks are named exactly: caption language expansion and fetch resume are lossless; usable captions create transcript and force-Whisper bypasses them; automatic caption transcript remains correctable; Whisper CUDA success records actual device; Whisper load failure falls back to CPU; Whisper iteration failure discards partial and falls back; CUDA PATH helper prepends existing NVIDIA bins once; setup installs GPU speech libraries only with a GPU; legacy extraction manifest resumes with default transcribe and device; contact sheets are opt-in and resume from completed frames; analyze_video forwards contact sheets only to extraction.
+
 On a green run, the self-test removes only tracked folders it created inside the app temp root and prints
 `test folders removed`. When any check fails, it prints `test folders retained for diagnosis` followed
 by their paths. `key_sheet_index` in the extraction manifest points readers to every key page, including

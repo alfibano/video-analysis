@@ -1,5 +1,53 @@
 # Release notes — video-analysis
 
+## v0.6.5 — 2026-11-28 — caption-first analysis and faster transcription
+
+### Changed
+- Extraction selects usable video-language captions before Whisper. `--transcribe auto|whisper`
+  controls whether captions are used or Whisper is forced; automatic captions remain correctable and
+  manual captions remain unchanged. Caption refresh on a compatible resume takes about 7 seconds
+  without changing or redownloading the video.
+- Whisper supports `--device auto|cpu|cuda`. CUDA uses `int8_float16`; if model loading or segment
+  iteration fails, the partial result is discarded and transcription restarts on CPU with `int8`.
+  The transcript stage records requested mode, requested/actual device, compute type, source, and
+  fallback reason. These choices do not change extraction identity, and older analysis folders
+  resume with current defaults.
+- `stages.transcript` fields include `source`, `transcribe`, `requested_device`, `actual_device`,
+  `compute_type`, and `fallback_reason`. A measured automatic-caption source was `captions:fr:auto`.
+- Setup installs optional `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` (about 1 GB) only when an
+  NVIDIA GPU is detected. Readiness reports `GPU speech: ready (CUDA)` or `GPU speech: CPU only`
+  with the reason.
+- Contact sheets are optional and off by default. `--contact-sheets` is forwarded by
+  `analyze_video.py`; `stages.sheets` records `sheets`, `keysheets`, and `key_sheet_index`. They can
+  be added to existing frames by rerunning extraction with the same options plus
+  `--contact-sheets`. Long-video analysis can use `bundle.json` and chosen frames instead.
+
+### Fixed
+- Videos tagged with a regional language (e.g. `fr-FR`) no longer miss their YouTube captions,
+  which are published only as `fr` / `fr-orig`: default requests are now `fr-FR, fr, fr-orig, en`.
+  A resumed fetch adds the missing captions in a subtitle-only pass; the video is not downloaded
+  again (measured: size and modification time unchanged).
+
+### Measured
+- Same 43-minute French video, not redownloaded: automatic pipeline time fell from 2091 s
+  (34 min 51 s) in v0.6.4 to 518 s (8 min 38 s), about 4.0× faster. Caption refresh took 7 s;
+  extraction without contact sheets took 135 s. Captions supplied 1348 segments / 7410 words in
+  under 1 s, versus Whisper's 6873 words. Correction took 146 s versus 192 s; OCR on 306 key
+  frames took 229 s versus about 485 s. The analysis folder fell from 421 MB to 213 MB, with no
+  `audio.wav` or contact sheets.
+- When captions are unavailable, Whisper on an RTX 3050 Ti 4 GB took 273 s using CUDA
+  `int8_float16`, versus about 1144 s using CPU `int8`; outputs had 6791 and 6873 words respectively.
+  CUDA requires the optional NVIDIA wheels; before installation, this machine raised
+  `RuntimeError: Library cublas64_12.dll is not found or cannot be loaded` during segment
+  iteration, then used the CPU fallback.
+- Default self-test: `DEFAULT_CHECKS=145` (145 passed, 0 failed); `--full`:
+  `FULL_CHECKS=147` (147 passed, 0 failed).
+- Measured: OCR reuse was tried, reused 0 of 306 candidates, proved useless, and was removed.
+
+### Deferred
+- Extraction parallelism remains deferred: prior split-extraction measurement saved at most
+  30 seconds and would add error aggregation, progress-stream, and resume-state complexity.
+
 ## v0.6.4 — 2026-11-27 — self-test cleanup and key-sheet reuse
 
 ### Changed

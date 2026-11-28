@@ -1,6 +1,6 @@
 ---
 name: video-analysis
-description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Local extraction works offline on Windows without system ffmpeg; transcript correction can use a configured AI service.
+description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, optional contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Local extraction works offline on Windows without system ffmpeg; transcript correction can use a configured AI service.
 ---
 
 # Video analysis — what is seen, what is said
@@ -117,8 +117,12 @@ during setup. Tool resolution: environment override
 JavaScript runtime (Deno, else Node). Normal setup prints `READY` only after setup and the offline
 self-test both succeed. `--check` runs only the offline self-test: it does not install tools, report
 readiness, or check the model cache.
-Setup may download tools and models; fetch downloads the requested public video; correction may send
-transcript text and context to the configured AI service as described in Confidentiality.
+On machines with a detected NVIDIA GPU, setup also installs optional `nvidia-cublas-cu12` and
+`nvidia-cudnn-cu12>=9,<10` (about 1 GB) to speed up Whisper. It reports `GPU speech: ready (CUDA)`
+or `GPU speech: CPU only (<reason>)`; this readiness is informational. `setup_tools.py --check`
+remains offline and does not install packages. Setup may download tools and models; fetch downloads
+the requested public video; correction may send transcript text and context to the configured AI
+service as described in Confidentiality.
 
 Whisper model: Whisper is OpenAI's open speech-recognition AI, run locally via `faster-whisper`; the
 *model* is its trained-knowledge file, downloaded once into the Hugging Face cache — afterwards the
@@ -183,8 +187,7 @@ never removed.
 python ~/.claude/skills/video-analysis/scripts/fetch_video.py "<URL>" --dest "<folder>"
 ```
 
-By default subtitles for the video's language and English are saved when available. Choose other
-languages with `--sub-langs fr en`. The video downloads first; subtitles download in a separate
+By default subtitles for the exact video language, base language, base-orig variant, and English are requested in order with duplicates removed. Choose languages explicitly with --sub-langs fr en. Compatible reruns refresh missing video-language captions without downloading the video again. The video downloads first; subtitles download in a separate
 best-effort pass, so subtitle errors (including rate limits) do not fail the fetch. Missing languages
 are reported in a warning and recorded in the fetch manifest. Fetch writes `metadata.json`, sanitized
 `raw_info.json`, available subtitle files, `sponsorblock.json`, and a v2 `manifest.json` into `<video>.analysis/`.
@@ -199,6 +202,11 @@ python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" -
 python ~/.claude/skills/video-analysis/scripts/correct_transcript.py "<video path>" --language fr
 python ~/.claude/skills/video-analysis/scripts/build_bundle.py "<video path>" --language fr
 ```
+With `--transcribe auto` (the default), extraction uses the first usable video-language caption in
+this order: manual exact language, base language, base-orig; then automatic captions in the same
+order; then Whisper. Automatic captions remain eligible for correction; manual captions are left
+unchanged. `--transcribe whisper` bypasses captions. Use `--device auto|cpu|cuda` to choose Whisper's
+device when it runs.
 For a local video using remote AI, ask before running the correction command above. If it exits 4,
 ask the user and rerun with `--allow-remote-ai` only after a yes. `analyze_video.py` runs
 `fetch → extract → correct → bundle`; its `--no-correct` option records an intentional skip. The
@@ -206,17 +214,20 @@ corrector accepts `--correct-model` through the pipeline (`--model` remains Whis
 `--base-url`, and `--ai-locality local|remote`. It writes `transcript.corrected.json` without
 changing original transcript or caption files. Changed correction settings or source are refused
 with exit 3.
-Run it in the **background** for videos longer than a few minutes: transcription runs ~5x faster
-than real time on CPU (a 15 min video takes ~3 min). Options: `--interval 5` (seconds between
+Run it in the **background** for videos longer than a few minutes. Whisper on CPU took about
+1144 s for this 43-minute video; on an RTX 3050 Ti, CUDA int8_float16 took 273 s for the same
+audio. A usable video-language caption avoids Whisper entirely. Options: `--transcribe auto|whisper`
+(`whisper` forces speech recognition even when captions exist), `--device auto|cpu|cuda` (`auto` tries
+CUDA then restarts the full transcript on CPU/int8 after a CUDA load or iteration failure), `--interval 5` (seconds between
 frames; use 2 for fast-moving screens, 10-15 for talking heads), `--model small` (`medium` = better,
 3x slower), `--skip-frames`, `--skip-transcript`, `--at HH:MM:SS[.mmm]` (repeatable, full-resolution
 frame at an exact instant — used in step 3d).
 
 Produces in `<video>.analysis\`: `frames\` (every interval) with their exact container timestamps
-in `frames.json`, `sheets\` (3x3 contact sheets, each image stamped hh:mm:ss.mmm in yellow),
-`keyframes.txt` + `stages.frames.key_sheet_index` in `manifest.json` (key pages point to
+in `frames.json`, optional `sheets\` (3x3 contact sheets, each image stamped hh:mm:ss.mmm in yellow),
+`keyframes.txt` + `stages.sheets.key_sheet_index` in `manifest.json` (key pages point to
 `keysheets\` or reuse an identical-frame-list page in `sheets\`),
-`audio.wav`, `transcript.txt` (`[mm:ss] text`) + `transcript.json`, `at\`, `manifest.json`. Re-running resumes and skips finished stages; changed extraction parameters or a
+`audio.wav` when Whisper is used, `transcript.txt` (`[mm:ss] text`) + `transcript.json`, `at\`, `manifest.json`. Contact sheets are created only with `--contact-sheets`; `stages.sheets` records `sheets`, `keysheets`, and `key_sheet_index`. Add them later by rerunning extraction with `--contact-sheets` and the same other options; completed frames are reused. Transcript provenance is in `stages.transcript`: source, requested device, actual device, compute type, fallback reason, and requested transcribe mode. `auto` tries CUDA with `int8_float16`; after a CUDA model-load or segment-iteration failure it discards partial rows and restarts on CPU with `int8`. Old extraction manifests resume with current defaults; completed transcripts are reused whatever device flags are supplied. `--transcribe`, `--device`, and `--contact-sheets` do not change extraction identity. Re-running resumes and skips finished stages; changed extraction parameters or a
 different video are **refused (exit 3)** instead of mixing outputs. Exit 1 = processing failure,
 2 = bad input.
 
@@ -241,11 +252,13 @@ frame; an empty string means it was scanned without finding text.
 a. **The speech**: each chapter's `speech_text` in `bundle.json`, else the whole transcript
    (`transcript.txt`). In courses and demos, the decisive content (numbers, rules, exceptions,
    the real method) is very often **in the voice, not on screen**.
-b. **The key-frame pages**, following each `path` in `manifest.json` →
-   `stages.frames.key_sheet_index`. A page can be in `keysheets\` or reuse a matching contact page
+b. **The key-frame pages**, when extracted with `--contact-sheets`, following each `path` in `manifest.json` →
+   `stages.sheets.key_sheet_index`. A page can be in `keysheets\` or reuse a matching contact page
    in `sheets\` (`reused_contact_sheet: true`). Older manifests without this index use `keysheets\`.
-c. **The contact sheets** (`sheets\`) — all of them, in order, to follow what moves between key
-   frames (cursor, drawings, charts updating).
+c. **The contact sheets** (`sheets\`), when extracted with `--contact-sheets`. They help follow
+   motion on short videos. Add them to an existing extraction by rerunning with `--contact-sheets`
+   and the same other options. For long videos, use `bundle.json` and chosen images in `frames\`
+   (or `keyframes.txt`) as the reading index.
 d. **Zoom where the speech points**: when the speaker says "here", "this candle", "look at…",
    re-run with `--at <timestamp>` **and the same options as the first run** (otherwise the manifest
    check refuses with exit 3), then read that full-resolution frame. Sheets are 640 px per cell —

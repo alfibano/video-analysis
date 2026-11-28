@@ -54,13 +54,20 @@ processing failed; exit 2 means invalid configuration or input; exit 3 means com
 output conflicts; exit 4 means consent is required.
 
 A [Claude Code](https://claude.com/claude-code) skill that lets an agent **read a local video**:
-what is **seen** (sampled frames, timestamped contact sheets, screen changes, exact-time frames) and
+what is **seen** (sampled frames, optional contact sheets, screen changes, exact-time frames) and
 what is **said** (offline timestamped transcript), with a procedure to report both cross-referenced
 by timestamp — keeping what is on screen, what is said, and what is inferred apart.
 
 Local analysis works offline after a one-time model download. Transcript correction can send text
 to a configured AI service; see [Confidentiality](#confidentiality) before enabling it. URL fetching
 is an explicit network step. No system ffmpeg or admin rights: tested on Windows 11 with Python 3.12.
+
+Release v0.6.5 prefers usable captions in the video's language and falls back to Whisper; use
+`--transcribe whisper` to force speech recognition. `--device auto|cpu|cuda` selects the Whisper
+device, with `auto` trying CUDA `int8_float16` before a full CPU `int8` restart if CUDA fails.
+Setup installs the optional NVIDIA CUDA speech libraries (about 1 GB) only when an NVIDIA GPU is
+detected. Contact sheets are optional and off by default; pass `--contact-sheets` to extraction or
+`analyze_video.py`. They can be added to existing frames by rerunning with the same other options.
 
 ## Confidentiality
 
@@ -159,10 +166,10 @@ downloads one public video. Progress is bounded.
 | Output | Content |
 |---|---|
 | `frames/` + `frames.json` | Sampled frames named by timestamp, `tSSSSSS.mmm.jpg` (e.g. `t000340.000.jpg`); `frames.json` holds the exact container timestamps and is authoritative. Sampling is adaptive by default: a base grid every `--interval` seconds (default 5) plus frames around screen changes detected at 1 fps; `--fixed-interval` opts out. |
-| `sheets/` | 3×3 contact sheets, each image stamped hh:mm:ss.mmm. |
-| `keyframes.txt` + `manifest.json` → `stages.frames.key_sheet_index` | Every key page and its path. A page reuses `sheets/sheetNN.jpg` when its ordered frame list matches a contact page; otherwise it is written under `keysheets/`. Older manifests without the index use `keysheets/`. |
-| `audio.wav` | 16 kHz mono audio track. |
-| `transcript.txt` + `transcript.json` | Offline Whisper transcript, `[mm:ss] text` (`--model`, default `small`; `--skip-transcript` to omit it). |
+| `sheets/` | Optional 3×3 contact sheets, each image stamped hh:mm:ss.mmm; created with `--contact-sheets`. |
+| `keyframes.txt` + `manifest.json` → `stages.sheets.key_sheet_index` | Key pages when extracted with `--contact-sheets`; a page reuses `sheets/sheetNN.jpg` when its ordered frame list matches a contact page, otherwise it is written under `keysheets/`. Older manifests without the index use `keysheets/`. |
+| `audio.wav` | 16 kHz mono audio track, extracted only when Whisper runs. |
+| `transcript.txt` + `transcript.json` | Timestamped transcript, `[mm:ss] text`: from usable video-language captions, else offline Whisper (`--model`, default `small`; `--skip-transcript` to omit it). `stages.transcript.source` tells which. |
 | `at/` | Full-resolution frames at exact instants, `--at HH:MM:SS[.mmm]` (repeatable). |
 | `manifest.json` | Updated with the extraction settings and stage status. |
 
@@ -266,8 +273,8 @@ The sheet copies `source.url` exactly from `bundle.json`; the renderer links onl
 
 ## Status
 
-v0.6.4 — measured default: `DEFAULT_CHECKS=134` (134 passed, 0 failed). The `--full` run measured
-`FULL_CHECKS=136` (136 result rows, including two additional full-mode checks). See
+v0.6.5 — measured default: `DEFAULT_CHECKS=145` (145 passed, 0 failed). The `--full` run measured
+`FULL_CHECKS=147` (147 passed, 0 failed). See
 [RELEASE_NOTES.md](RELEASE_NOTES.md), including the improvement roadmap.
 
 ## License

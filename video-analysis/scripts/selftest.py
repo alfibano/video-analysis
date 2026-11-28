@@ -22,8 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CHECKS=134
-FULL_CHECKS=136
+DEFAULT_CHECKS=145
+FULL_CHECKS=147
 CHILD_OUTPUT: list[str] = []
 LAST_EXTRACT_OUTPUT = ""
 CHECK_OUTPUTS: dict[str, str] = {}
@@ -3231,14 +3231,14 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_v064_documentation_and_release_contract() -> bool:
+def check_v065_documentation_and_release_contract() -> bool:
     readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
     release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
     test_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
     docs = readme + skill + release + platform + test_docs
-    release_contract = "v0.6.4" in release and "2026-11-27" in release
+    release_contract = "v0.6.5" in release and "2026-11-28" in release
     comments = all(term in docs for term in ("--comments 0", "commenter identity", "without names"))
     language = all(term in docs for term in ("user's requested", "--language", "sheet language"))
     migration = "regenerate sheet.json with the v0.6.0 brief" in docs
@@ -3248,8 +3248,15 @@ def check_v064_documentation_and_release_contract() -> bool:
         "incontestable sources", "never debunk", "spirituality", "esotericism", "flagrant imprecision"))
     structure = all(term in docs.lower() for term in ("blocks", "callouts", "references", "several frames"))
     extraction_updates = all(term in docs.lower() for term in (
-        "key_sheet_index", "reused contact sheet", "test folders removed", "retained for diagnosis",
-        "older manifests"))
+        "key_sheet_index", "--contact-sheets", "optional", "test folders removed",
+        "retained for diagnosis", "older manifests"))
+    release_measurement = all(term in release for term in (
+        "2091 s", "518 s", "273 s", "1144 s", "229 s", "146 s", "421 MB", "213 MB"))
+    transcript_contract = all(term in docs for term in (
+        "--transcribe", "--device", "requested_device", "actual_device", "compute_type",
+        "fallback_reason", "captions:fr:auto"))
+    sheets_contract = "optional contact sheets" in readme.lower() + skill.lower() + release.lower()
+    no_ocr_reuse_claim = "ocr_reused" not in docs and "OCR reuse was tried, reused 0 of 306" in release
     count_surfaces = [readme, release, test_docs, Path(__file__).read_text(encoding="utf-8")]
     count_pins = []
     for key in ("DEFAULT_CHECKS", "FULL_CHECKS"):
@@ -3261,7 +3268,8 @@ def check_v064_documentation_and_release_contract() -> bool:
             values.append(match.group(1))
         count_pins.append(len(set(values)) == 1)
     return all((release_contract, comments, language, migration, facts_cost,
-                editorial, structure, extraction_updates, *count_pins))
+                editorial, structure, extraction_updates, release_measurement,
+                transcript_contract, sheets_contract, no_ocr_reuse_claim, *count_pins))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -3917,9 +3925,9 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["v0.6.4 documentation extraction and measured-count contract"] = run_check(
-            "v0.6.4 documentation extraction and measured-count contract",
-            check_v064_documentation_and_release_contract)
+        checks["v0.6.5 documentation performance and measured-count contract"] = run_check(
+            "v0.6.5 documentation performance and measured-count contract",
+            check_v065_documentation_and_release_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(
