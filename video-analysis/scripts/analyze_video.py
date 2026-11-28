@@ -51,6 +51,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-correct", action="store_true", help="record an intentional correction skip")
     parser.add_argument("--language", help="transcript and caption language")
     parser.add_argument("--skip-frames", action="store_true", help="skip sampled frame extraction")
+    parser.add_argument("--contact-sheets", action="store_true",
+                        help="also create contact and key-frame sheets during extraction")
     parser.add_argument("--skip-transcript", action="store_true", help="skip Whisper transcription")
     parser.add_argument("--at", action="append", help="also extract a frame at this timestamp")
     parser.add_argument("--fixed-interval", action="store_true", help="disable adaptive sampling")
@@ -101,6 +103,8 @@ def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[st
                          ("fixed_interval", "--fixed-interval")):
         if getattr(args, name):
             extract.append(option)
+    if args.contact_sheets:
+        extract.append("--contact-sheets")
     for timestamp in args.at or []:
         extract.extend(("--at", timestamp))
     if args.ocr_min_score is not None:

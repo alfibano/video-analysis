@@ -509,13 +509,13 @@ def folder_megabytes(folder: Path) -> float:
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=("Extract sampled frames, contact sheets, visible scene changes,\n"
+        description=("Extract sampled frames, optional contact sheets, visible scene changes,\n"
                      "and an offline timestamped transcript from one local video.\n"
                      "Reads the video and a cached Whisper model, then writes all results into\n"
                      "<video folder>/<video name>.analysis/; it never deletes files.\n"
                      "Run setup_tools.py and selftest.py first when preparing a machine;\n"
-                     "afterward read transcript.txt and the key-frame sheets, then review\n"
-                     "the contact sheets."),
+                     "afterward read transcript.txt and the key frames. Use --contact-sheets\n"
+                     "to create optional contact sheets for free analysis."),
         epilog=("Example: python extract_video.py \"lecture.mp4\" --interval 5 --language fr\n"
                 "Exit codes: 0 success; 1 processing failure; 2 usage or input error;\n"
                 "3 manifest conflict."))
@@ -536,7 +536,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
                         help="use usable captions first or force Whisper (default: %(default)s)")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
                         help="try CUDA then restart on CPU, or select CPU only (default: %(default)s)")
-    parser.add_argument("--skip-frames", action="store_true", help="skip frame and contact-sheet extraction")
+    parser.add_argument("--skip-frames", action="store_true", help="skip frame and optional contact-sheet extraction")
+    parser.add_argument("--contact-sheets", action="store_true",
+                        help="also create contact and key-frame sheets (default: off)")
     parser.add_argument("--skip-transcript", action="store_true", help="skip audio transcription")
     parser.add_argument("--at", type=parse_time, action="append", default=[],
                         help="also save a full-resolution frame at HH:MM:SS[.mmm]; repeatable")
@@ -562,23 +564,37 @@ def run(args: argparse.Namespace) -> None:
     manifest.update(probe(video))
     save_manifest(work, manifest)
 
-    if not args.skip_frames and not stages.get("frames"):
-        count = extract_frames(video, work, args.interval, adaptive=adaptive,
-                               motion_threshold=args.motion_threshold,
-                               motion_margin=args.motion_margin)
-        frames = sorted((work / "frames").glob("*.jpg"))
-        stamps = load_frame_stamps(work)
-        sheets = build_sheets(frames, work / "sheets", args.interval, stamps)
-        keys = key_frames(frames, args.dedup_threshold)
-        (work / "keyframes.txt").write_text(
-            "".join(f"{frame_label(k, args.interval, stamps)}  frames/{k.name}\n" for k in keys), encoding="utf-8")
-        key_sheet_index = build_key_sheets(keys, frames, work / "keysheets", work / "sheets",
-                                           args.interval, stamps)
-        key_sheets = sum(not entry["reused_contact_sheet"] for entry in key_sheet_index)
-        stages["frames"] = {"frames": count, "sheets": sheets, "keyframes": len(keys),
-                             "keysheets": key_sheets, "key_sheet_index": key_sheet_index}
-        save_manifest(work, manifest)
-        print(f"frames {count} | sheets {sheets} | key frames {len(keys)}")
+    if not args.skip_frames:
+        new_frames = not stages.get("frames")
+        if new_frames:
+            count = extract_frames(video, work, args.interval, adaptive=adaptive,
+                                   motion_threshold=args.motion_threshold,
+                                   motion_margin=args.motion_margin)
+        if new_frames or args.contact_sheets:
+            frames = sorted((work / "frames").glob("*.jpg"))
+            stamps = load_frame_stamps(work)
+            keys = key_frames(frames, args.dedup_threshold)
+            if new_frames:
+                (work / "keyframes.txt").write_text(
+                    "".join(f"{frame_label(k, args.interval, stamps)}  frames/{k.name}\n"
+                            for k in keys), encoding="utf-8")
+                stages["frames"] = {"frames": count, "keyframes": len(keys)}
+                save_manifest(work, manifest)
+            if args.contact_sheets and not stages.get("sheets"):
+                sheets = build_sheets(frames, work / "sheets", args.interval, stamps)
+                key_sheet_index = build_key_sheets(keys, frames, work / "keysheets", work / "sheets",
+                                                   args.interval, stamps)
+                key_sheets = sum(not entry["reused_contact_sheet"] for entry in key_sheet_index)
+                stages["sheets"] = {"sheets": sheets, "keysheets": key_sheets,
+                                    "key_sheet_index": key_sheet_index}
+                save_manifest(work, manifest)
+            frame_count = stages["frames"]["frames"]
+            key_count = stages["frames"]["keyframes"]
+            if args.contact_sheets:
+                sheet_stage = stages["sheets"]
+                print(f"frames {frame_count} | sheets {sheet_stage['sheets']} | key frames {key_count}")
+            else:
+                print(f"frames {frame_count} | key frames {key_count}")
 
     if not args.skip_transcript and not stages.get("transcript"):
         caption_result = caption_transcript(work, video.stem, args.language) if args.transcribe == "auto" else None

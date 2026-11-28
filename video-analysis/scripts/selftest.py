@@ -3249,6 +3249,49 @@ def check_analyze_video_forwards_explicit_host() -> bool:
     return forwarded[forwarded.index("--host") + 1] == "openclaw"
 
 
+def check_analyze_video_forwards_contact_sheets_only_to_extraction() -> bool:
+    import analyze_video
+    args = analyze_video._parser().parse_args(["sample.mp4", "--contact-sheets"])
+    extract, correct, bundle = analyze_video._step_args(args, "sample.mp4")
+    return "--contact-sheets" in extract and "--contact-sheets" not in correct + bundle
+
+
+def check_contact_sheets_are_opt_in_and_resume(video: Path, default_output: str) -> bool:
+    work = video.parent / f"{video.stem}.analysis"
+    manifest_path = work / "manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    frame_mtime = next((work / "frames").glob("*.jpg")).stat().st_mtime_ns
+    default = not (work / "sheets").exists() and not (work / "keysheets").exists()
+    default = default and "sheets" not in before["stages"] and "sheets" not in before["stages"]["frames"]
+    default = default and "keysheets" not in before["stages"]["frames"]
+    default = default and "key_sheet_index" not in before["stages"]["frames"]
+    default = default and "sheets" not in default_output and "key frames" in default_output
+
+    first = extract(video, "--skip-transcript", "--contact-sheets")
+    first_output = LAST_EXTRACT_OUTPUT
+    with_sheets = json.loads(manifest_path.read_text(encoding="utf-8"))
+    sheet_files = list((work / "sheets").glob("*.jpg"))
+    key_files = list((work / "keysheets").glob("*.jpg")) if (work / "keysheets").exists() else []
+    sheet_stage = with_sheets["stages"].get("sheets", {})
+    index = sheet_stage.get("key_sheet_index", [])
+    generated = (first == 0 and bool(sheet_files) and sheet_stage.get("sheets") == len(sheet_files)
+                 and sheet_stage.get("keysheets") == len(key_files))
+    generated = generated and bool(index) and all(
+        (work / entry["path"]).is_file() for entry in index)
+    generated = generated and "key_sheet_index" not in with_sheets["stages"]["frames"]
+    generated = generated and with_sheets["stages"]["frames"].get("keyframes") == before["stages"]["frames"].get("keyframes")
+    generated = generated and next((work / "frames").glob("*.jpg")).stat().st_mtime_ns == frame_mtime
+    generated = generated and "sheets" in first_output and "key frames" in first_output
+
+    sheet_mtime = sheet_files[0].stat().st_mtime_ns
+    second = extract(video, "--skip-transcript", "--contact-sheets")
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    reused = (second == 0 and after["stages"]["sheets"] == sheet_stage
+              and sheet_files[0].stat().st_mtime_ns == sheet_mtime
+              and next((work / "frames").glob("*.jpg")).stat().st_mtime_ns == frame_mtime)
+    return default and generated and reused
+
+
 def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     import correct_transcript as correction
     from tools import make_temp_folder
@@ -3681,7 +3724,11 @@ def main() -> int:
         "first run exit 0": first == 0,
         "folder created next to the video": work.parent == video.parent,
         "adaptive base grid and change margin": manifest["stages"]["frames"]["frames"] >= 6,
-        "1 contact sheet": len(list((work / "sheets").glob("*.jpg"))) == 1,
+        "default extraction omits contact sheets": (not (work / "sheets").exists()
+            and not (work / "keysheets").exists() and "sheets" not in manifest["stages"]
+            and "sheets" not in manifest["stages"]["frames"]
+            and "key_sheet_index" not in manifest["stages"]["frames"]
+            and "sheets" not in first_output and "key frames" in first_output),
         "scene change detected (2 key frames)": manifest["stages"]["frames"]["keyframes"] == 2,
         "exact frame at 00:00:12.250": (work / "at" / "at_00h00m12s250.jpg").exists(),
         "audio detected": manifest["has_audio"] is True,
@@ -3709,6 +3756,9 @@ def main() -> int:
         "selftest cleanup removes tracked folders and refuses outside paths", check_selftest_cleanup_guard)
     checks["key-sheet pages reuse matching contact sheets and are indexed"] = run_check(
         "key-sheet pages reuse matching contact sheets and are indexed", check_key_sheet_reuses_contact_pages)
+    checks["contact sheets are opt-in and resume from completed frames"] = run_check(
+        "contact sheets are opt-in and resume from completed frames",
+        lambda: check_contact_sheets_are_opt_in_and_resume(video, first_output))
     checks["downloaded video names are short and safe"] = run_check(
         "downloaded video names are short and safe", check_safe_video_stem)
     checks["bundle manifest resumes and conflicts safely"] = run_check(
@@ -3729,6 +3779,9 @@ def main() -> int:
             check_caption_language_expansion_and_fetch_resume)
         checks["analyze_video forwards bounded comments"] = run_check(
             "analyze_video forwards bounded comments", check_analyze_video_comments)
+        checks["analyze_video forwards contact sheets only to extraction"] = run_check(
+            "analyze_video forwards contact sheets only to extraction",
+            check_analyze_video_forwards_contact_sheets_only_to_extraction)
         checks["sheet schema accepts strict v2 and rejects unknown nested fields"] = run_check(
             "sheet schema accepts strict v2 and rejects unknown nested fields", check_sheet_schema_valid)
         checks["sheet schema enforces duration proportional summary paragraphs"] = run_check(
