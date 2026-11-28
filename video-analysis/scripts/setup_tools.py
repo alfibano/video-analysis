@@ -48,6 +48,61 @@ def install(packages: list[str]) -> bool:
     return subprocess.run(command, check=False).returncode == 0
 
 
+GPU_SPEECH_PACKAGES = ("nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10")
+
+
+def cuda_device_count() -> int:
+    try:
+        return int(importlib.import_module("ctranslate2").get_cuda_device_count())
+    except Exception:
+        return 0
+
+
+def missing_gpu_speech_packages() -> list[str]:
+    absent = []
+    for distribution, package in zip(("nvidia-cublas-cu12", "nvidia-cudnn-cu12"), GPU_SPEECH_PACKAGES):
+        try:
+            importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            absent.append(package)
+    return absent
+
+
+def ensure_gpu_speech_dependencies(gpu_probe: Callable[[], bool] | None = None,
+                                   missing: Callable[[], list[str]] = missing_gpu_speech_packages) -> bool:
+    """Install large optional CUDA runtime wheels only on hosts with an NVIDIA GPU."""
+    probe = gpu_probe or (lambda: cuda_device_count() > 0)
+    try:
+        has_gpu = bool(probe())
+    except Exception:
+        has_gpu = False
+    if not has_gpu:
+        return True
+    try:
+        absent = missing()
+    except Exception:
+        return True
+    if not absent:
+        return True
+    print("GPU speech libraries are about 1 GB and only speed up Whisper.")
+    return install(absent)
+
+
+def gpu_speech_readiness(gpu_probe: Callable[[], bool] | None = None,
+                         missing: Callable[[], list[str]] = missing_gpu_speech_packages) -> str:
+    probe = gpu_probe or (lambda: cuda_device_count() > 0)
+    try:
+        if not probe():
+            return "GPU speech: CPU only (no NVIDIA GPU detected)"
+    except Exception as error:
+        return f"GPU speech: CPU only ({type(error).__name__})"
+    try:
+        absent = missing()
+    except Exception as error:
+        return f"GPU speech: CPU only ({type(error).__name__})"
+    return "GPU speech: CPU only (missing " + ", ".join(absent) + ")" if absent else "GPU speech: ready (CUDA)"
+
+
 def report_tool(name: str, tool: Tool | None) -> bool:
     if tool is None:
         print(f"{name}: missing")
@@ -67,6 +122,7 @@ def report_tools(ffmpeg: Tool | None, ytdlp: Tool | None, js_runtime: Tool | Non
         ready = report_tool("JavaScript runtime", js_runtime) and ready
     ready = report_ocr() and ready
     ready = report_correction() and ready
+    print(gpu_speech_readiness())
     return ready
 
 
@@ -219,9 +275,9 @@ def main(argv: list[str] | None = None) -> int:
         if absent:
             print("still missing after install:", ", ".join(absent))
             return 1
-        ready = report_tools(ffmpeg, resolve_ytdlp(), resolve_js_runtime())
-    else:
-        ready = report_tools(ffmpeg, resolve_ytdlp(), resolve_js_runtime())
+    # After the main install: the GPU probe needs ctranslate2, which faster-whisper brings.
+    ensure_gpu_speech_dependencies()
+    ready = report_tools(ffmpeg, resolve_ytdlp(), resolve_js_runtime())
     if not ffmpeg_works(ffmpeg):
         return 1
     if not args.no_model_download and not cache_model(args.model):

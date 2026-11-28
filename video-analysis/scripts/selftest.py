@@ -1769,11 +1769,13 @@ def check_caption_transcript_and_force_whisper() -> bool:
     (force_work / "sample.fr.vtt").write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n", encoding="utf-8")
     seed_manifest(force_work, force_video)
     calls = []
-    def fake_transcribe(audio: Path, target: Path, model: str, language: str) -> int:
+    def fake_transcribe(audio: Path, target: Path, model: str, language: str,
+                        requested_device: str = "auto"):
         calls.append((audio, model, language))
         (target / "transcript.json").write_text(json.dumps({"language": "fr", "segments": []}), encoding="utf-8")
         (target / "transcript.txt").write_text("", encoding="utf-8")
-        return 0
+        from extract_video import TranscriptionResult
+        return TranscriptionResult([], "fr", requested_device, "cpu", "int8", None)
     with (patch.object(extract_video, "probe", return_value={"duration_s": 5, "has_audio": True}),
           patch.object(extract_video, "extract_audio", return_value=force_work / "audio.wav"),
           patch.object(extract_video, "transcribe", side_effect=fake_transcribe),
@@ -1787,7 +1789,9 @@ def check_caption_transcript_and_force_whisper() -> bool:
             and transcript_stage.get("source") == "captions:fr:auto"
             and transcript_stage.get("segments") == 1
             and not (work / "audio.wav").exists() and forced == 0 and len(calls) == 1
-            and forced_manifest.get("params", {}).get("extract", {}).get("transcribe") == "whisper")
+            and forced_manifest.get("params", {}).get("extract", {}).get("transcribe") is None
+            and transcript_stage.get("transcribe") == "auto"
+            and forced_manifest["stages"]["transcript"].get("transcribe") == "whisper")
 
 
 def check_automatic_caption_transcript_is_correctable() -> bool:
@@ -2075,13 +2079,126 @@ def check_analyze_video_local_pipeline() -> bool:
           contextlib.redirect_stderr(io.StringIO())):
         code = analyze_video.main(["C:\\videos\\talk.mp4", "--skip-transcript", "--skip-ocr",
                                    "--language", "fr", "--interval", "3", "--at", "00:00:10",
-                                   "--transcribe", "whisper"])
+                                    "--transcribe", "whisper", "--device", "cuda"])
     return (code == 0 and [call[0] for call in calls] == ["extract", "correct", "bundle"]
             and "--skip-transcript" in calls[0][1] and "--skip-ocr" in calls[2][1]
             and calls[0][1][calls[0][1].index("--transcribe") + 1] == "whisper"
+            and calls[0][1][calls[0][1].index("--device") + 1] == "cuda"
             and "--transcribe" not in calls[1][1] + calls[2][1]
             and all(calls[index][1][calls[index][1].index("--language") + 1] == "fr"
                     for index in (0, 1, 2)))
+
+
+def _fake_whisper_audio(root: Path) -> Path:
+    audio = root / "tiny.wav"
+    with wave.open(str(audio), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16000)
+        stream.writeframes(b"\x01\x00" * 160)
+    return audio
+
+
+def check_whisper_cuda_success_metadata() -> bool:
+    from extract_video import transcribe
+    calls = []
+    def factory(name: str, *, device: str, compute_type: str):
+        calls.append((device, compute_type))
+        return SimpleNamespace(transcribe=lambda samples, language: (
+            iter([SimpleNamespace(start=0.0, end=0.1, text="ok")]),
+            SimpleNamespace(language="en")))
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        result = transcribe(_fake_whisper_audio(root), root, "tiny", "auto", "auto", factory)
+        data = json.loads((root / "transcript.json").read_text(encoding="utf-8"))
+        cpu_result = transcribe(_fake_whisper_audio(root), root, "tiny", "auto", "cpu", factory)
+        stage = result.to_stage()
+    return (calls == [("cuda", "int8_float16"), ("cpu", "int8")] and result.actual_device == "cuda"
+            and result.compute_type == "int8_float16" and result.requested_device == "auto"
+            and result.fallback_reason is None and data["segments"][0]["text"] == "ok"
+            and stage["source"] == "whisper" and stage["requested_device"] == "auto"
+            and stage["actual_device"] == "cuda" and stage["compute_type"] == "int8_float16"
+            and cpu_result.actual_device == "cpu" and cpu_result.requested_device == "cpu")
+
+
+def check_whisper_load_failure_cpu_fallback() -> bool:
+    from extract_video import transcribe
+    calls = []
+    def factory(name: str, *, device: str, compute_type: str):
+        calls.append((device, compute_type))
+        if device == "cuda":
+            raise RuntimeError("CUDA unavailable\nextra detail")
+        return SimpleNamespace(transcribe=lambda samples, language: (
+            iter([SimpleNamespace(start=0.0, end=0.1, text="cpu")]),
+            SimpleNamespace(language="en")))
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        result = transcribe(_fake_whisper_audio(root), root, "tiny", "auto", "cuda", factory)
+        stage = result.to_stage()
+    return (calls == [("cuda", "int8_float16"), ("cpu", "int8")]
+            and result.actual_device == "cpu" and result.compute_type == "int8"
+            and stage["fallback_reason"].startswith("RuntimeError: CUDA unavailable")
+            and "\n" not in stage["fallback_reason"] and len(stage["fallback_reason"]) <= 160)
+
+
+def check_whisper_iteration_failure_cpu_restart() -> bool:
+    from extract_video import transcribe
+    calls = []
+    def factory(name: str, *, device: str, compute_type: str):
+        calls.append((device, compute_type))
+        def segments():
+            if device == "cuda":
+                yield SimpleNamespace(start=0.0, end=0.1, text="forbidden")
+                raise RuntimeError("iteration failed")
+            yield SimpleNamespace(start=0.1, end=0.2, text="cpu complete")
+        return SimpleNamespace(transcribe=lambda samples, language: (segments(), SimpleNamespace(language="fr")))
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        result = transcribe(_fake_whisper_audio(root), root, "tiny", "auto", "auto", factory)
+        data = json.loads((root / "transcript.json").read_text(encoding="utf-8"))
+    texts = [row["text"] for row in data["segments"]]
+    return (calls == [("cuda", "int8_float16"), ("cpu", "int8")]
+            and result.actual_device == "cpu" and texts == ["cpu complete"]
+            and result.fallback_reason.startswith("RuntimeError: iteration failed"))
+
+
+def check_whisper_path_helper() -> bool:
+    from extract_video import prepend_nvidia_bin_paths
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        root = Path(temp)
+        one = root / "one"; one.mkdir()
+        two = root / "two"; two.mkdir()
+        first = prepend_nvidia_bin_paths("base", [one, two, one])
+        again = prepend_nvidia_bin_paths(first, [one, two])
+        absent = prepend_nvidia_bin_paths("base", [])
+    return first == os.pathsep.join((str(one), str(two), "base")) and again == first and absent == "base"
+
+
+def check_setup_gpu_speech_dependencies() -> bool:
+    import setup_tools
+    with patch.object(setup_tools, "install", return_value=True) as install:
+        setup_tools.ensure_gpu_speech_dependencies(
+            lambda: True, lambda: ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"])
+        gpu_packages = install.call_args.args[0]
+        install.reset_mock()
+        setup_tools.ensure_gpu_speech_dependencies(lambda: False, lambda: ["nvidia-cublas-cu12"])
+    return (gpu_packages == ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
+            and install.call_count == 0)
+
+
+def check_legacy_extraction_manifest_resumes_default_device() -> bool:
+    from extract_video import load_manifest
+    with tempfile.TemporaryDirectory(dir=_temp_root()) as temp:
+        folder = Path(temp)
+        video = folder / "video.mp4"; video.write_bytes(b"video")
+        work = folder / "work"; work.mkdir()
+        identity = {"path": str(video.resolve()), "size": video.stat().st_size,
+                    "mtime_ns": video.stat().st_mtime_ns, "kind": "local"}
+        (work / "manifest.json").write_text(json.dumps({"schema_version": 2,
+            "source": identity, "params": {"fetch": {}, "extract": {"interval": 5}},
+            "stages": {"transcript": {"segments": 1, "source": "whisper"}}}), encoding="utf-8")
+        manifest = load_manifest(work, identity, {"interval": 5, "transcribe": "auto", "device": "auto"})
+    return manifest["params"]["extract"] == {"interval": 5}
 
 
 def check_analyze_video_url_pipeline() -> bool:
@@ -2354,14 +2471,14 @@ def check_extract_preserves_bundle_params() -> bool:
             "params": {"fetch": {}, "extract": {"interval": 5}, "bundle": {"ocr_engine": "skipped"}},
             "stages": {"bundle": {"status": "done"}}}
     (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
-    result = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5, "transcribe": "whisper"})
+    result = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5})
     try:
-        load_manifest(folder, {"path": "video.mp4"}, {"interval": 5, "transcribe": "auto"})
-        auto_conflict = False
+        load_manifest(folder, {"path": "video.mp4"}, {"interval": 5})
+        resume_ok = True
     except FileExistsError:
-        auto_conflict = True
+        resume_ok = False
     return (result["params"]["bundle"] == {"ocr_engine": "skipped"}
-            and "bundle" in result["stages"] and auto_conflict)
+            and "bundle" in result["stages"] and resume_ok)
 
 
 def check_manifest_source_kinds() -> bool:
@@ -2374,14 +2491,14 @@ def check_manifest_source_kinds() -> bool:
     identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     local_work = folder / "local.analysis"
     local_work.mkdir()
-    local = load_manifest(local_work, identity, {"interval": 5, "transcribe": "whisper"})
+    local = load_manifest(local_work, identity, {"interval": 5})
     legacy = {"schema_version": 2, "source": identity,
               "params": {"fetch": {"url": "https://example.invalid/v"}, "extract": {"interval": 5}},
               "stages": {}}
     legacy_work = folder / "legacy.analysis"
     legacy_work.mkdir()
     (legacy_work / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
-    migrated = load_manifest(legacy_work, identity, {"interval": 5, "transcribe": "whisper"})
+    migrated = load_manifest(legacy_work, identity, {"interval": 5})
     return local["source"].get("kind") == "local" and migrated["source"].get("kind") == "url"
 
 
@@ -2397,7 +2514,7 @@ def check_extract_preserves_correction_state() -> bool:
             "stages": {"correct_transcript": stage}}
     (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
     result = load_manifest(folder, {key: value for key, value in identity.items() if key != "kind"},
-                          {"interval": 5, "transcribe": "whisper"})
+                          {"interval": 5})
     return (result["params"].get("correct_transcript") == correction
             and result["stages"].get("correct_transcript") == stage
             and result["source"].get("kind") == "local")
@@ -3619,6 +3736,19 @@ def main() -> int:
         checks["yt-dlp resolved as module when CLI absent"] = run_check("yt-dlp resolved as module when CLI absent", check_ytdlp_module_resolution)
         checks["JS runtime prefers deno then node"] = run_check("JS runtime prefers deno then node", check_js_runtime)
         checks["setup installs only missing dependencies"] = run_check("setup installs only missing dependencies", check_setup_plan)
+        checks["Whisper CUDA success records actual device"] = run_check(
+            "Whisper CUDA success records actual device", check_whisper_cuda_success_metadata)
+        checks["Whisper load failure falls back to CPU"] = run_check(
+            "Whisper load failure falls back to CPU", check_whisper_load_failure_cpu_fallback)
+        checks["Whisper iteration failure discards partial and falls back"] = run_check(
+            "Whisper iteration failure discards partial and falls back", check_whisper_iteration_failure_cpu_restart)
+        checks["CUDA PATH helper prepends existing NVIDIA bins once"] = run_check(
+            "CUDA PATH helper prepends existing NVIDIA bins once", check_whisper_path_helper)
+        checks["setup installs GPU speech libraries only with a GPU"] = run_check(
+            "setup installs GPU speech libraries only with a GPU", check_setup_gpu_speech_dependencies)
+        checks["legacy extraction manifest resumes with default transcribe and device"] = run_check(
+            "legacy extraction manifest resumes with default transcribe and device",
+            check_legacy_extraction_manifest_resumes_default_device)
         checks["OCR readiness reported by setup"] = run_check("OCR readiness reported by setup", check_setup_ocr_readiness)
         checks["setup installs then tests and check only tests"] = run_check(
             "setup installs then tests and check only tests", check_setup_entry_modes)

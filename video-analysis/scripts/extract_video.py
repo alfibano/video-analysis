@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import re
 import queue
 import subprocess
@@ -318,21 +320,84 @@ def extract_audio(video: Path, work: Path) -> Path:
     return target
 
 
-def transcribe(audio: Path, work: Path, model_name: str, language: str) -> int:
-    """Whisper on an in-memory array: passing a path breaks on recent PyAV ('metadata_errors')."""
+@dataclass(frozen=True, slots=True)
+class TranscriptionResult:
+    rows: list[dict[str, object]]
+    language: str
+    requested_device: str
+    actual_device: str | None
+    compute_type: str | None
+    fallback_reason: str | None
+
+    def to_stage(self, transcribe: str = "whisper") -> dict[str, object]:
+        return {"segments": len(self.rows), "source": "whisper", "transcribe": transcribe,
+                "requested_device": self.requested_device, "actual_device": self.actual_device,
+                "compute_type": self.compute_type, "fallback_reason": self.fallback_reason}
+
+
+def prepend_nvidia_bin_paths(current_path: str, candidate_dirs: list[Path]) -> str:
+    """Prepend existing NVIDIA wheel bin folders once, preserving current PATH."""
+    parts = current_path.split(os.pathsep) if current_path else []
+    known = {os.path.normcase(os.path.abspath(part)) for part in parts if part}
+    prefix = []
+    for candidate in candidate_dirs:
+        if candidate.is_dir():
+            value = str(candidate.resolve())
+            key = os.path.normcase(os.path.abspath(value))
+            if key not in known:
+                known.add(key)
+                prefix.append(value)
+    return os.pathsep.join([*prefix, *parts])
+
+
+def nvidia_bin_directories() -> list[Path]:
+    try:
+        spec = importlib.util.find_spec("nvidia")
+        roots = list(spec.submodule_search_locations or []) if spec else []
+    except (ImportError, ValueError):
+        roots = []
+    return [folder for root in roots for folder in Path(root).glob("*/bin") if folder.is_dir()]
+
+
+def _whisper_factory(model_name: str, device: str, compute_type: str):
+    if device == "cuda" and os.name == "nt":
+        os.environ["PATH"] = prepend_nvidia_bin_paths(os.environ.get("PATH", ""), nvidia_bin_directories())
     from faster_whisper import WhisperModel
+    return WhisperModel(model_name, device=device, compute_type=compute_type)
+
+
+def _fallback_text(error: Exception) -> str:
+    return f"{type(error).__name__}: {' '.join(str(error).split())}"[:160]
+
+
+def transcribe(audio: Path, work: Path, model_name: str, language: str,
+               requested_device: str = "auto", model_factory=None) -> TranscriptionResult:
+    """Materialize complete Whisper attempts before output, restarting cleanly on CPU."""
     with wave.open(str(audio), "rb") as stream:
         raw = stream.readframes(stream.getnframes())
     samples = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(samples, language=None if language == "auto" else language)
-    rows = [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()} for s in segments]
+    factory = model_factory or _whisper_factory
+    attempts = [("cpu", "int8")] if requested_device == "cpu" else [("cuda", "int8_float16"), ("cpu", "int8")]
+    fallback_reason = None
+    for index, (device, compute_type) in enumerate(attempts):
+        try:
+            model = factory(model_name, device=device, compute_type=compute_type)
+            segments, info = model.transcribe(samples, language=None if language == "auto" else language)
+            rows = [{"start": round(segment.start, 2), "end": round(segment.end, 2),
+                     "text": segment.text.strip()} for segment in segments]
+            result = TranscriptionResult(rows, info.language, requested_device, device, compute_type,
+                                         fallback_reason)
+            break
+        except Exception as error:
+            if index == len(attempts) - 1:
+                raise
+            fallback_reason = _fallback_text(error)
     (work / "transcript.json").write_text(
-        json.dumps({"language": info.language, "segments": rows}, ensure_ascii=False, indent=1),
+        json.dumps({"language": result.language, "segments": result.rows}, ensure_ascii=False, indent=1),
         encoding="utf-8")
-    lines = [f"[{clock(row['start'])}] {row['text']}" for row in rows]
+    lines = [f"[{clock(float(row['start']))}] {row['text']}" for row in result.rows]
     (work / "transcript.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return len(rows)
+    return result
 
 
 def caption_transcript(work: Path, video_stem: str, language: str) -> tuple[str, list[dict[str, object]]] | None:
@@ -387,6 +452,7 @@ def exact_frames(video: Path, work: Path, times: list[float], duration: float) -
 
 def load_manifest(work: Path, identity: dict[str, object], params: dict[str, object]) -> dict:
     from tools import media_source_kind, same_video
+    params = {key: value for key, value in params.items() if key not in {"transcribe", "device"}}
     path = work / "manifest.json"
     if not path.exists():
         if any(work.iterdir()):
@@ -399,11 +465,10 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         recorded_params = manifest.get("params", {})
         other_params = {key: value for key, value in recorded_params.items()
                         if key not in {"fetch", "extract"}}
-        extract_params = recorded_params.get("extract", {})
+        extract_params = {key: value for key, value in recorded_params.get("extract", {}).items()
+                          if key not in {"transcribe", "device"}}
         fetch_params = recorded_params.get("fetch", {})
         fetch_only_unconfigured = not extract_params
-        if extract_params and "transcribe" not in extract_params:
-            extract_params = {**extract_params, "transcribe": "whisper"}
     else:
         # v0.1 stored extraction settings directly in params.
         fetch_params = {}
@@ -469,6 +534,8 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--language", default="auto", help="transcript language, such as auto, fr, or en (default: %(default)s)")
     parser.add_argument("--transcribe", choices=("auto", "whisper"), default="auto",
                         help="use usable captions first or force Whisper (default: %(default)s)")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                        help="try CUDA then restart on CPU, or select CPU only (default: %(default)s)")
     parser.add_argument("--skip-frames", action="store_true", help="skip frame and contact-sheet extraction")
     parser.add_argument("--skip-transcript", action="store_true", help="skip audio transcription")
     parser.add_argument("--at", type=parse_time, action="append", default=[],
@@ -483,7 +550,7 @@ def run(args: argparse.Namespace) -> None:
     identity = {"path": str(video), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     adaptive = not args.fixed_interval
     params = {"interval": args.interval, "dedup_threshold": args.dedup_threshold,
-              "model": args.model, "language": args.language, "transcribe": args.transcribe,
+              "model": args.model, "language": args.language,
               "sampling_mode": "adaptive" if adaptive else "fixed",
               "sampling_fps": 1 if adaptive else 1 / args.interval,
               "motion_threshold": args.motion_threshold,
@@ -519,16 +586,21 @@ def run(args: argparse.Namespace) -> None:
             source, rows = caption_result
             language = source.split(":")[1]
             write_caption_transcript(work, language, rows)
-            stages["transcript"] = {"segments": len(rows), "source": source}
+            stages["transcript"] = {"segments": len(rows), "source": source, "transcribe": args.transcribe,
+                                     "requested_device": args.device, "actual_device": None,
+                                     "compute_type": None, "fallback_reason": None}
             print(f"transcript segments {len(rows)} from {source}")
         elif not manifest["has_audio"]:
-            stages["transcript"] = {"segments": 0, "note": "no audio stream"}
+            stages["transcript"] = {"segments": 0, "source": "none", "transcribe": args.transcribe,
+                                     "requested_device": args.device, "actual_device": None,
+                                     "compute_type": None, "fallback_reason": None,
+                                     "note": "no audio stream"}
             print("no audio stream: transcript skipped")
         else:
             audio = extract_audio(video, work)
-            segments = transcribe(audio, work, args.model, args.language)
-            stages["transcript"] = {"segments": segments}
-            print(f"transcript segments {segments}")
+            result = transcribe(audio, work, args.model, args.language, args.device)
+            stages["transcript"] = result.to_stage(args.transcribe)
+            print(f"transcript segments {len(result.rows)} on {result.actual_device}/{result.compute_type}")
         save_manifest(work, manifest)
 
     if args.at:

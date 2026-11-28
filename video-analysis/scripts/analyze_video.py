@@ -38,6 +38,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Whisper model name")
     parser.add_argument("--transcribe", choices=("auto", "whisper"), default="auto",
                         help="use captions first or force Whisper during extraction")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                        help="try CUDA then restart on CPU, or select CPU only during extraction")
     parser.add_argument("--correct-model", help="transcript correction model")
     parser.add_argument("--host", choices=("claude-code", "codex", "openclaw"), help="host providing AI models")
     parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openai", "local"),
@@ -74,6 +76,8 @@ def _step_args(args: argparse.Namespace, video: str) -> tuple[list[str], list[st
             extract.extend((option, str(value)))
     if args.transcribe != "auto":
         extract.extend(("--transcribe", args.transcribe))
+    if args.device != "auto":
+        extract.extend(("--device", args.device))
     if args.language is not None:
         bundle.extend(("--language", args.language))
         correct.extend(("--language", args.language))
