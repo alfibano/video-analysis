@@ -1700,15 +1700,125 @@ def check_bundle_chapters() -> bool:
 
 def check_bundle_subtitle_priority() -> bool:
     from bundle import dedupe_rolling_cues, parse_vtt, select_speech_source
+    from tools import make_temp_folder
     fixture_dir = HERE / "fixtures"
     raw = json.loads((fixture_dir / "raw_info_subtitles.json").read_text(encoding="utf-8"))
-    chosen = select_speech_source("fr", raw, ["video.fr.vtt"], transcript_language="en", video_stem="video")
+    folder = make_temp_folder("caption-priority-")
+    manual = folder / "video.fr.vtt"
+    automatic = folder / "video.fr-orig.vtt"
+    manual.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nmanual\n", encoding="utf-8")
+    automatic.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nautomatic\n", encoding="utf-8")
+    raw["automatic_captions"]["fr-orig"] = [{}]
+    chosen = select_speech_source("fr", raw, [manual, automatic], transcript_language="en",
+                                  video_stem="video", work=folder)
+    manual.write_text("not a subtitle", encoding="utf-8")
+    fallback = select_speech_source("fr", raw, [manual, automatic], transcript_language="en",
+                                    video_stem="video", work=folder)
+    automatic.write_text("not a subtitle", encoding="utf-8")
+    whisper = select_speech_source("fr", raw, [manual, automatic], transcript_language="en",
+                                   video_stem="video", work=folder)
+    ordered_folder = make_temp_folder("caption-language-order-")
+    fr = ordered_folder / "clip.fr.vtt"
+    orig = ordered_folder / "clip.fr-orig.vtt"
+    fr.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nbase\n", encoding="utf-8")
+    orig.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\norig\n", encoding="utf-8")
+    ordered = select_speech_source("fr-FR", {"subtitles": {"fr": [{}], "fr-orig": [{}]}},
+                                   [fr, orig], video_stem="clip", work=ordered_folder)
     rolling = (fixture_dir / "youtube_auto.fr.vtt").read_text(encoding="utf-8")
     cues = dedupe_rolling_cues(parse_vtt(rolling, rolling=True))
     expected = ("Bonjour \u00e0 tous, aujourd'hui nous allons parler des \u00e9quations. "
                 "C'est une le\u00e7on importante. Prenez votre cahier et notez")
-    return (chosen.source == "manual" and chosen.language == "fr" and
+    return (chosen.source == "manual" and chosen.language == "fr" and fallback.source == "automatic"
+            and fallback.language == "fr-orig" and whisper.source == "whisper"
+            and ordered.source == "manual" and ordered.language == "fr" and
             " ".join(cue.text for cue in cues) == expected)
+
+
+def check_caption_transcript_and_force_whisper() -> bool:
+    import extract_video
+    from tools import make_temp_folder
+    folder = make_temp_folder("caption-transcript-")
+    video = folder / "sample.mp4"
+    video.write_bytes(b"fake video")
+    work = folder / "sample.analysis"
+    work.mkdir()
+    (work / "raw_info.json").write_text(json.dumps({
+        "language": "fr-FR", "subtitles": {}, "automatic_captions": {"fr": [{}]}}), encoding="utf-8")
+    (work / "sample.fr.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nBonjour à tous\n", encoding="utf-8")
+    def seed_manifest(path: Path, target: Path) -> None:
+        stat = target.stat()
+        (path / "manifest.json").write_text(json.dumps({"schema_version": 2,
+            "source": {"kind": "local", "path": str(target.resolve()), "size": stat.st_size,
+                       "mtime_ns": stat.st_mtime_ns}, "params": {"fetch": {}, "extract": {}}, "stages": {}}),
+            encoding="utf-8")
+    seed_manifest(work, video)
+    with (patch.object(extract_video, "probe", return_value={"duration_s": 5, "has_audio": True}),
+          patch.object(extract_video, "extract_audio", side_effect=AssertionError("audio extracted")),
+          patch.object(extract_video, "transcribe", side_effect=AssertionError("Whisper loaded")),
+          contextlib.redirect_stdout(io.StringIO())):
+        automatic = extract_video.main([str(video), "--skip-frames"])
+    transcript = json.loads((work / "transcript.json").read_text(encoding="utf-8")) if (work / "transcript.json").exists() else {}
+    stage = json.loads((work / "manifest.json").read_text(encoding="utf-8")) if (work / "manifest.json").exists() else {}
+    force_folder = make_temp_folder("force-whisper-")
+    force_video = force_folder / "sample.mp4"
+    force_video.write_bytes(b"fake video")
+    force_work = force_folder / "sample.analysis"
+    force_work.mkdir()
+    (force_work / "raw_info.json").write_text(json.dumps({"language": "fr", "subtitles": {"fr": [{}]}}), encoding="utf-8")
+    (force_work / "sample.fr.vtt").write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nCaption\n", encoding="utf-8")
+    seed_manifest(force_work, force_video)
+    calls = []
+    def fake_transcribe(audio: Path, target: Path, model: str, language: str) -> int:
+        calls.append((audio, model, language))
+        (target / "transcript.json").write_text(json.dumps({"language": "fr", "segments": []}), encoding="utf-8")
+        (target / "transcript.txt").write_text("", encoding="utf-8")
+        return 0
+    with (patch.object(extract_video, "probe", return_value={"duration_s": 5, "has_audio": True}),
+          patch.object(extract_video, "extract_audio", return_value=force_work / "audio.wav"),
+          patch.object(extract_video, "transcribe", side_effect=fake_transcribe),
+          contextlib.redirect_stdout(io.StringIO())):
+        forced = extract_video.main([str(force_video), "--skip-frames", "--transcribe", "whisper"])
+    forced_manifest = json.loads((force_work / "manifest.json").read_text(encoding="utf-8"))
+    transcript_stage = stage.get("stages", {}).get("transcript", {})
+    return (automatic == 0 and transcript.get("segments") == [
+                {"start": 0.0, "end": 2.0, "text": "Bonjour à tous"}]
+            and (work / "transcript.txt").read_text(encoding="utf-8") == "[00:00] Bonjour à tous\n"
+            and transcript_stage.get("source") == "captions:fr:auto"
+            and transcript_stage.get("segments") == 1
+            and not (work / "audio.wav").exists() and forced == 0 and len(calls) == 1
+            and forced_manifest.get("params", {}).get("extract", {}).get("transcribe") == "whisper")
+
+
+def check_automatic_caption_transcript_is_correctable() -> bool:
+    from tools import make_temp_folder
+    folder = make_temp_folder("automatic-caption-correction-")
+    video = folder / "sample.mp4"
+    video.write_bytes(b"fake video")
+    work = folder / "sample.analysis"
+    work.mkdir()
+    caption = work / "sample.fr.vtt"
+    caption_bytes = b"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nBounjour le monde\n"
+    caption.write_bytes(caption_bytes)
+    raw = {"language": "fr", "subtitles": {}, "automatic_captions": {"fr": [{}]}}
+    (work / "raw_info.json").write_text(json.dumps(raw), encoding="utf-8")
+    stat = video.stat()
+    manifest = {"schema_version": 2, "source": {"kind": "local", "path": str(video.resolve()),
+                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, "params": {"fetch": {}, "extract": {}}, "stages": {}}
+    (work / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (work / "transcript.json").write_text(json.dumps({"language": "fr", "segments": []}), encoding="utf-8")
+    calls = []
+    class FakeClient:
+        def correct(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            return {"text": "1\tBonjour le monde"}
+    result = call_correction(video, client_factory=lambda **kwargs: FakeClient(), api_key="fake",
+                             locality="local", language="fr")
+    corrected = work / "transcript.corrected.json"
+    output = json.loads(corrected.read_text(encoding="utf-8")) if corrected.exists() else {}
+    return (result == 0 and len(calls) > 0 and caption.read_bytes() == caption_bytes
+            and output.get("source", {}).get("kind") == "automatic"
+            and output.get("segments", [{}])[0].get("corrected_text") == "Bonjour le monde")
 
 
 def check_bundle_subtitle_parsers() -> bool:
@@ -1964,9 +2074,12 @@ def check_analyze_video_local_pipeline() -> bool:
           patch.object(analyze_video, "bundle_main", side_effect=lambda argv: calls.append(("bundle", argv)) or 0),
           contextlib.redirect_stderr(io.StringIO())):
         code = analyze_video.main(["C:\\videos\\talk.mp4", "--skip-transcript", "--skip-ocr",
-                                   "--language", "fr", "--interval", "3", "--at", "00:00:10"])
+                                   "--language", "fr", "--interval", "3", "--at", "00:00:10",
+                                   "--transcribe", "whisper"])
     return (code == 0 and [call[0] for call in calls] == ["extract", "correct", "bundle"]
             and "--skip-transcript" in calls[0][1] and "--skip-ocr" in calls[2][1]
+            and calls[0][1][calls[0][1].index("--transcribe") + 1] == "whisper"
+            and "--transcribe" not in calls[1][1] + calls[2][1]
             and all(calls[index][1][calls[index][1].index("--language") + 1] == "fr"
                     for index in (0, 1, 2)))
 
@@ -2241,8 +2354,14 @@ def check_extract_preserves_bundle_params() -> bool:
             "params": {"fetch": {}, "extract": {"interval": 5}, "bundle": {"ocr_engine": "skipped"}},
             "stages": {"bundle": {"status": "done"}}}
     (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
-    result = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5})
-    return result["params"]["bundle"] == {"ocr_engine": "skipped"} and "bundle" in result["stages"]
+    result = load_manifest(folder, {"path": "video.mp4"}, {"interval": 5, "transcribe": "whisper"})
+    try:
+        load_manifest(folder, {"path": "video.mp4"}, {"interval": 5, "transcribe": "auto"})
+        auto_conflict = False
+    except FileExistsError:
+        auto_conflict = True
+    return (result["params"]["bundle"] == {"ocr_engine": "skipped"}
+            and "bundle" in result["stages"] and auto_conflict)
 
 
 def check_manifest_source_kinds() -> bool:
@@ -2255,14 +2374,14 @@ def check_manifest_source_kinds() -> bool:
     identity = {"path": str(video.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     local_work = folder / "local.analysis"
     local_work.mkdir()
-    local = load_manifest(local_work, identity, {"interval": 5})
+    local = load_manifest(local_work, identity, {"interval": 5, "transcribe": "whisper"})
     legacy = {"schema_version": 2, "source": identity,
               "params": {"fetch": {"url": "https://example.invalid/v"}, "extract": {"interval": 5}},
               "stages": {}}
     legacy_work = folder / "legacy.analysis"
     legacy_work.mkdir()
     (legacy_work / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
-    migrated = load_manifest(legacy_work, identity, {"interval": 5})
+    migrated = load_manifest(legacy_work, identity, {"interval": 5, "transcribe": "whisper"})
     return local["source"].get("kind") == "local" and migrated["source"].get("kind") == "url"
 
 
@@ -2278,7 +2397,7 @@ def check_extract_preserves_correction_state() -> bool:
             "stages": {"correct_transcript": stage}}
     (folder / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
     result = load_manifest(folder, {key: value for key, value in identity.items() if key != "kind"},
-                          {"interval": 5})
+                          {"interval": 5, "transcribe": "whisper"})
     return (result["params"].get("correct_transcript") == correction
             and result["stages"].get("correct_transcript") == stage
             and result["source"].get("kind") == "local")
@@ -3529,6 +3648,11 @@ def main() -> int:
             "fixed interval opt out", lambda: check_fixed_interval_opt_out(folder))
         checks["chapter source precedence and bounds"] = run_check("chapter source precedence and bounds", check_bundle_chapters)
         checks["subtitle priority and rolling VTT dedupe"] = run_check("subtitle priority and rolling VTT dedupe", check_bundle_subtitle_priority)
+        checks["usable captions create transcript and force-Whisper bypasses them"] = run_check(
+            "usable captions create transcript and force-Whisper bypasses them",
+            check_caption_transcript_and_force_whisper)
+        checks["automatic caption transcript remains correctable"] = run_check(
+            "automatic caption transcript remains correctable", check_automatic_caption_transcript_is_correctable)
         checks["srt and vtt normalize to segments"] = run_check("srt and vtt normalize to segments", check_bundle_subtitle_parsers)
         checks["frames align by exact PTS"] = run_check("frames align by exact PTS", check_bundle_frame_pts)
         checks["sponsor spans remain flagged and summary text excludes them"] = run_check(

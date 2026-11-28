@@ -335,6 +335,40 @@ def transcribe(audio: Path, work: Path, model_name: str, language: str) -> int:
     return len(rows)
 
 
+def caption_transcript(work: Path, video_stem: str, language: str) -> tuple[str, list[dict[str, object]]] | None:
+    """Return normalized video-language caption segments when a usable file exists."""
+    from bundle import read_speech_segments, select_speech_source
+    try:
+        raw_info = json.loads((work / "raw_info.json").read_text(encoding="utf-8"))
+        metadata_path = work / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        raw_info, metadata = {}, {}
+    raw_info = raw_info if isinstance(raw_info, dict) else {}
+    raw_info.setdefault("language", metadata.get("language"))
+    selected = language if language != "auto" else raw_info.get("language")
+    if not isinstance(selected, str) or not selected:
+        return None
+    files = [path for path in work.iterdir() if path.is_file()]
+    source = select_speech_source(selected, raw_info, files, transcript_available=False,
+                                  video_stem=video_stem, work=work)
+    if source.source not in {"manual", "automatic"}:
+        return None
+    segments = read_speech_segments(source, work, {})
+    if not segments:
+        return None
+    rows = [{"start": segment.start, "end": segment.end, "text": segment.text} for segment in segments]
+    return f"captions:{source.language}" + (":auto" if source.source == "automatic" else ""), rows
+
+
+def write_caption_transcript(work: Path, language: str, rows: list[dict[str, object]]) -> None:
+    """Write caption segments in the existing Whisper transcript file format."""
+    (work / "transcript.json").write_text(
+        json.dumps({"language": language, "segments": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
+    lines = [f"[{clock(float(row['start']))}] {row['text']}" for row in rows]
+    (work / "transcript.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def exact_frames(video: Path, work: Path, times: list[float], duration: float) -> list[str]:
     folder = work / "at"
     folder.mkdir(exist_ok=True)
@@ -368,6 +402,8 @@ def load_manifest(work: Path, identity: dict[str, object], params: dict[str, obj
         extract_params = recorded_params.get("extract", {})
         fetch_params = recorded_params.get("fetch", {})
         fetch_only_unconfigured = not extract_params
+        if extract_params and "transcribe" not in extract_params:
+            extract_params = {**extract_params, "transcribe": "whisper"}
     else:
         # v0.1 stored extraction settings directly in params.
         fetch_params = {}
@@ -431,6 +467,8 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
                         help="mean grey difference 0-255 for a key frame (default: %(default)s)")
     parser.add_argument("--model", default="small", help="Whisper model name (default: %(default)s)")
     parser.add_argument("--language", default="auto", help="transcript language, such as auto, fr, or en (default: %(default)s)")
+    parser.add_argument("--transcribe", choices=("auto", "whisper"), default="auto",
+                        help="use usable captions first or force Whisper (default: %(default)s)")
     parser.add_argument("--skip-frames", action="store_true", help="skip frame and contact-sheet extraction")
     parser.add_argument("--skip-transcript", action="store_true", help="skip audio transcription")
     parser.add_argument("--at", type=parse_time, action="append", default=[],
@@ -445,7 +483,7 @@ def run(args: argparse.Namespace) -> None:
     identity = {"path": str(video), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     adaptive = not args.fixed_interval
     params = {"interval": args.interval, "dedup_threshold": args.dedup_threshold,
-              "model": args.model, "language": args.language,
+              "model": args.model, "language": args.language, "transcribe": args.transcribe,
               "sampling_mode": "adaptive" if adaptive else "fixed",
               "sampling_fps": 1 if adaptive else 1 / args.interval,
               "motion_threshold": args.motion_threshold,
@@ -476,7 +514,14 @@ def run(args: argparse.Namespace) -> None:
         print(f"frames {count} | sheets {sheets} | key frames {len(keys)}")
 
     if not args.skip_transcript and not stages.get("transcript"):
-        if not manifest["has_audio"]:
+        caption_result = caption_transcript(work, video.stem, args.language) if args.transcribe == "auto" else None
+        if caption_result:
+            source, rows = caption_result
+            language = source.split(":")[1]
+            write_caption_transcript(work, language, rows)
+            stages["transcript"] = {"segments": len(rows), "source": source}
+            print(f"transcript segments {len(rows)} from {source}")
+        elif not manifest["has_audio"]:
             stages["transcript"] = {"segments": 0, "note": "no audio stream"}
             print("no audio stream: transcript skipped")
         else:

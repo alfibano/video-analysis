@@ -228,7 +228,8 @@ def _read_speech(inputs: BundleInputs, language: str) -> SpeechRead:
                                   transcript_language=transcript_language,
                                   transcript_available=isinstance(transcript, dict)
                                   and isinstance(transcript.get("segments"), list),
-                                  video_stem=str(inputs.metadata.get("video_stem") or ""))
+                                  video_stem=str(inputs.metadata.get("video_stem") or ""),
+                                  work=inputs.work)
     segments = read_speech_segments(source, inputs.work, transcript)
     identity = _speech_identity(source, inputs.work)
     corrected = _read_matching_correction(inputs, source, segments)

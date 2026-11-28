@@ -202,33 +202,47 @@ def dedupe_rolling_cues(cues: Iterable[SpeechSegment | tuple[float, float, str]]
     return result
 
 
-def _language_match(keys: Iterable[str], language: str) -> str | None:
-    normalized = language.casefold()
-    candidates = [key for key in keys if key.casefold() == normalized]
-    if candidates:
-        return candidates[0]
-    prefix = normalized.split("-", 1)[0]
-    return next((key for key in keys if key.casefold().split("-", 1)[0] == prefix), None)
+def iter_caption_candidates(language: str, raw_info: Mapping[str, Any],
+                            files: Iterable[str | Path] = (), *,
+                            video_stem: str | None = None) -> Iterable[SpeechSource]:
+    """Yield manual then automatic caption files in the canonical video-language order."""
+    from fetch_video import caption_language_candidates
+    paths = sorted((Path(item) for item in files), key=lambda path: path.name.casefold())
+    languages = caption_language_candidates({"language": language})
+    for source, field in (("manual", "subtitles"), ("automatic", "automatic_captions")):
+        group = raw_info.get(field) or {}
+        if not isinstance(group, Mapping):
+            continue
+        for requested in languages:
+            key = next((str(item) for item in group if str(item).casefold() == requested.casefold()), None)
+            if key is None:
+                continue
+            prefix = f"{video_stem}.{key}." if video_stem else None
+            for path in paths:
+                if (path.suffix.casefold() in {".vtt", ".srt"}
+                        and (prefix is None or path.name.casefold().startswith(prefix.casefold()))):
+                    yield SpeechSource(source, str(key), str(path))
+
+
+def _usable_caption(source: SpeechSource, work: Path) -> bool:
+    try:
+        return bool(read_speech_segments(source, work, {}))
+    except (OSError, UnicodeError, ValueError, TypeError, OverflowError):
+        return False
 
 
 def select_speech_source(language: str | None, raw_info: Mapping[str, Any],
                          files: Iterable[str | Path] = (), *, transcript_language: str | None = None,
-                         transcript_available: bool = True, video_stem: str | None = None) -> SpeechSource:
+                         transcript_available: bool = True, video_stem: str | None = None,
+                         work: Path | None = None) -> SpeechSource:
     """Choose manual, automatic, transcript, or empty speech using provenance and files."""
     selected_language = language if language and language != "auto" else (
         raw_info.get("language") or transcript_language)
     if selected_language:
-        paths = [Path(item) for item in files]
-        stem = video_stem
-        for group, source in ((raw_info.get("subtitles") or {}, "manual"),
-                              (raw_info.get("automatic_captions") or {}, "automatic")):
-            key = _language_match(group.keys(), str(selected_language))
-            if key is None:
-                continue
-            candidates = [path for path in paths if path.suffix.casefold() in {".vtt", ".srt"}
-                          and (stem is None or path.name.startswith(f"{stem}.{key}."))]
-            if candidates:
-                return SpeechSource(source, key, str(sorted(candidates, key=lambda path: path.name)[0]))
+        for candidate in iter_caption_candidates(str(selected_language), raw_info, files,
+                                                 video_stem=video_stem):
+            if _usable_caption(candidate, work or Path.cwd()):
+                return candidate
     if transcript_available:
         return SpeechSource("whisper", transcript_language or selected_language, "transcript.json")
     return SpeechSource("none", selected_language, None)

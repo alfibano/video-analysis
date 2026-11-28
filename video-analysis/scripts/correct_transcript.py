@@ -636,7 +636,7 @@ def _source_data(video: Path, work: Path, inputs: SourceSelectionInputs) -> tupl
                                   transcript_language=transcript_language,
                                   transcript_available=isinstance(inputs.transcript, Mapping)
                                   and isinstance(inputs.transcript.get("segments"), list),
-                                  video_stem=video.stem)
+                                  video_stem=video.stem, work=work)
     return source, read_speech_segments(
         source, work, inputs.transcript if isinstance(inputs.transcript, Mapping) else {})
 
