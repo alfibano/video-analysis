@@ -52,7 +52,6 @@ class BundleResult:
     ocr_texts: dict[str, str]
     ocr_frames: list[Any]
     ocr_skipped: dict[str, str]
-    ocr_reused: int = 0
 
 
 class BundleInputError(ValueError):
@@ -284,7 +283,6 @@ def transient_key_frames(frames: dict[str, Any], keyframes: list[str],
 
 def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = None,
                    speech: SpeechRead | None = None) -> dict[str, Any]:
-    from ocr import OCR_REUSE_ALGORITHM, OCR_REUSE_RMSE
     engine = "skipped" if args.skip_ocr else _ocr_version()
     if args.skip_ocr:
         ocr_threads = None
@@ -296,8 +294,6 @@ def _bundle_params(args: argparse.Namespace, extract: dict[str, Any] | None = No
             "min_chapter": args.min_chapter, "max_chapter": args.max_chapter,
             "target_chapter": args.target_chapter, "skip_ocr": args.skip_ocr,
             "ocr_engine": engine, "ocr_intra_op_threads": ocr_threads,
-            "ocr_reuse_algorithm": None if args.skip_ocr else OCR_REUSE_ALGORITHM,
-            "ocr_reuse_threshold": None if args.skip_ocr else OCR_REUSE_RMSE,
             "ocr_skip_transient_s": transient_key_frames({}, [], extract or {})[1]}
     if speech is not None:
         params["speech_input"] = {"source": speech.source, "corrected_from": speech.corrected_from,
@@ -356,30 +352,29 @@ def _make_chapters(inputs: BundleInputs, args: argparse.Namespace,
 
 
 def run_ocr(inputs: BundleInputs, assignments: list[Any],
-            args: argparse.Namespace) -> tuple[dict[str, str], list[Any], dict[str, str], int]:
+            args: argparse.Namespace) -> tuple[dict[str, str], list[Any], dict[str, str]]:
     if args.skip_ocr:
-        return {}, [], {}, 0
-    from ocr import ocr_key_frames_with_stats
+        return {}, [], {}
+    from ocr import ocr_key_frames
     extract = inputs.manifest.get("params", {}).get("extract", {})
     skipped_names, _ = transient_key_frames(inputs.frames, inputs.keyframes, extract)
     skipped = {item.file: "transient" for item in assignments
                if item.is_key and Path(item.file).name in skipped_names}
     frames = [(item.file, inputs.work / item.file) for item in assignments
               if item.is_key and item.file not in skipped]
-    result = ocr_key_frames_with_stats(frames, min_score=args.ocr_min_score)
-    return result.texts, frames, skipped, result.reused
+    return ocr_key_frames(frames, min_score=args.ocr_min_score), frames, skipped
 
 
 def _prepare(inputs: BundleInputs, args: argparse.Namespace) -> BundleResult:
     speech = _read_speech(inputs, args.language)
     chapters, assignments = _make_chapters(inputs, args, speech)
-    return BundleResult(chapters, assignments, speech, {}, [], {}, 0)
+    return BundleResult(chapters, assignments, speech, {}, [], {})
 
 
 def _with_ocr(inputs: BundleInputs, result: BundleResult,
               args: argparse.Namespace) -> BundleResult:
-    texts, frames, skipped, reused = run_ocr(inputs, result.assignments, args)
-    return BundleResult(result.chapters, result.assignments, result.speech, texts, frames, skipped, reused)
+    texts, frames, skipped = run_ocr(inputs, result.assignments, args)
+    return BundleResult(result.chapters, result.assignments, result.speech, texts, frames, skipped)
 
 
 def write_outputs(inputs: BundleInputs, result: BundleResult,
@@ -404,7 +399,6 @@ def _write_bundle(inputs: BundleInputs, result: BundleResult,
     inputs.manifest.setdefault("stages", {})["bundle"] = {
         "status": "done", "chapters": len(result.chapters), "frames": len(result.assignments),
         "ocr_frames": len(result.ocr_frames), "ocr_transient_skipped": len(result.ocr_skipped),
-        "ocr_reused": result.ocr_reused,
         "speech_source": result.speech.source}
     (inputs.work / "manifest.json").write_text(
         json.dumps(inputs.manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -412,7 +406,7 @@ def _write_bundle(inputs: BundleInputs, result: BundleResult,
 
 def _report_bundle(inputs: BundleInputs, result: BundleResult, source: str) -> None:
     print(f"BUNDLE: chapters {len(result.chapters)} | frames {len(result.assignments)} | "
-          f"OCR frames {len(result.ocr_frames)} | OCR reused {result.ocr_reused} | speech {source}")
+          f"OCR frames {len(result.ocr_frames)} | speech {source}")
     print(f"WORK FOLDER: {inputs.work}")
 
 
