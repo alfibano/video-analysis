@@ -135,7 +135,8 @@ La correction distante envoie le texte transcrit et un contexte vidéo limité, 
 
 ## Statut
 
-v0.6.5 a mesuré `DEFAULT_CHECKS=145` (145 réussis, 0 échec) et `FULL_CHECKS=147` (147 réussis, 0 échec). Voir les [notes de version](RELEASE_NOTES.md).
+v0.7.0 a mesuré `DEFAULT_CHECKS=148` (148 lignes, 0 échec) et `FULL_CHECKS=150` (150 réussis,
+0 échec). Voir les [notes de version](RELEASE_NOTES.md).
 
 ## Licence
 

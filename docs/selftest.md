@@ -107,13 +107,13 @@ not required because ZIP metadata and relationship ordering vary.
 | Setup | `setup maps docx import to python-docx` |
 | Extraction | `key-sheet pages reuse matching contact sheets and are indexed`; verifies ordered page reuse and SHA-256 uniqueness across `keysheets/` and `sheets/` |
 | Cleanup | `selftest cleanup removes tracked folders and refuses outside paths`; verifies nested owned folders under a `TemporaryDirectory` are removed and an outside path triggers the guard |
-| Documentation | `v0.6.5 documentation performance and measured-count contract` |
+| Documentation | `v0.7.0 multilingual README and release contract` |
 
 The check named `default DOCX render has ordered content images and properties` also verifies that
 built-in-template hyperlink runs have visible formatting when no `Hyperlink` character style exists.
 Source links must match `bundle.json` and use a safe HTTP(S) URL; unsafe values remain plain text.
-Measured release totals: `DEFAULT_CHECKS=145` (145 passed, 0 failed); `FULL_CHECKS=147`
-(147 passed, 0 failed; two full-mode transcription checks add to the default total).
+Measured release totals: `DEFAULT_CHECKS=148` (148 rows, 0 failed); `--full`:
+`FULL_CHECKS=150` (150 passed, 0 failed, with the cached Whisper model).
 New v0.6.5 offline checks are named exactly: caption language expansion and fetch resume are lossless; usable captions create transcript and force-Whisper bypasses them; automatic caption transcript remains correctable; Whisper CUDA success records actual device; Whisper load failure falls back to CPU; Whisper iteration failure discards partial and falls back; CUDA PATH helper prepends existing NVIDIA bins once; setup installs GPU speech libraries only with a GPU; legacy extraction manifest resumes with default transcribe and device; contact sheets are opt-in and resume from completed frames; analyze_video forwards contact sheets only to extraction.
 
 The current environment and pipeline checks are named exactly: `VIDEO_DIGEST environment names

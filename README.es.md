@@ -135,7 +135,8 @@ La corrección remota de la transcripción envía el texto transcrito y contexto
 
 ## Estado
 
-v0.6.5 midió `DEFAULT_CHECKS=145` (145 correctas, 0 fallidas) y `FULL_CHECKS=147` (147 correctas, 0 fallidas). Consulta las [notas de la versión](RELEASE_NOTES.md).
+v0.7.0 midió `DEFAULT_CHECKS=148` (148 filas, 0 fallidas) y `FULL_CHECKS=150` (150 superadas,
+0 fallidas). Consulta las [notas de la versión](RELEASE_NOTES.md).
 
 ## Licencia
 

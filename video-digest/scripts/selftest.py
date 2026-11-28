@@ -3310,14 +3310,101 @@ def check_consent_eof_and_noninteractive_stdout_exit_4() -> bool:
     return eof == 4 and noninteractive == 4
 
 
-def check_v065_documentation_and_release_contract() -> bool:
-    readme = (HERE.parents[1] / "README.md").read_text(encoding="utf-8")
+def check_v070_multilingual_documentation_contract() -> bool:
+    root = HERE.parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    readme_fr = (root / "README.fr.md").read_text(encoding="utf-8")
+    readme_es = (root / "README.es.md").read_text(encoding="utf-8")
     skill = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
-    release = (HERE.parents[1] / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-    platform = (HERE.parents[1] / "docs" / "platform-plan.md").read_text(encoding="utf-8")
-    test_docs = (HERE.parents[1] / "docs" / "selftest.md").read_text(encoding="utf-8")
+    release = (root / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    platform = (root / "docs" / "platform-plan.md").read_text(encoding="utf-8")
+    test_docs = (root / "docs" / "selftest.md").read_text(encoding="utf-8")
     docs = readme + skill + release + platform + test_docs
-    release_contract = "v0.6.5" in release and "2026-11-28" in release
+    readmes = (readme, readme_fr, readme_es)
+    switcher = "[English](README.md) · [Français](README.fr.md) · [Español](README.es.md)"
+    headings = [re.findall(r"^#{2,3} .+$", text, re.MULTILINE) for text in readmes]
+    expected_headings = [
+        "## Features", "## Installation", "## Analyse a video", "### URL", "### Local file",
+        "### Options", "## Output", "## Processing steps", "## Limits", "## Confidentiality",
+        "## Status", "## License",
+    ]
+    expected_headings_fr = [
+        "## Fonctionnalités", "## Installation", "## Analyser une vidéo", "### URL",
+        "### Fichier local", "### Options", "## Résultats", "## Étapes de traitement",
+        "## Limites", "## Confidentialité", "## Statut", "## Licence",
+    ]
+    expected_headings_es = [
+        "## Funciones", "## Instalación", "## Analizar un vídeo", "### URL",
+        "### Archivo local", "### Opciones", "## Resultados", "## Etapas del procesamiento",
+        "## Límites", "## Confidencialidad", "## Estado", "## Licencia",
+    ]
+    taglines = (
+        ("Forty minutes of video, five minutes of reading.",
+         "The essentials, structured and annotated — none of the detours."),
+        ("40 minutes de vidéo, 5 minutes de lecture.",
+         "L'essentiel, structuré et commenté, sans les digressions."),
+        ("40 minutos de vídeo, 5 minutos de lectura.",
+         "Lo esencial, estructurado y comentado, sin rodeos."),
+    )
+    def command_lines(text: str) -> list[str]:
+        commands: list[str] = []
+        in_fence = False
+        for line in text.splitlines():
+            if line.startswith("```"):
+                in_fence = not in_fence
+            elif in_fence and line.strip() and not line.lstrip().startswith("#"):
+                commands.append(line)
+        return commands
+
+    commands = command_lines(readme)
+    options = set(re.findall(r"--[a-z][a-z0-9-]*", readme))
+    section_content = all(
+        all(term in text for term in (
+            "<video folder>/<video name>.analysis/", "<video name>.analysis/<video name>.docx",
+            "bundle.json", "sheet.json", "Whisper", "CUDA", "int8_float16", "`int8`",
+            "Claude Code", "Codex", "OpenClaw", "MIT"))
+        and len(re.findall(r"^\d+\. ", text, re.MULTILINE)) >= 7
+        for text in readmes
+    ) and all(term in text for text, term in zip(
+        readmes, ("No host or SDK provider", "Aucun hôte ni fournisseur SDK",
+                  "Sin anfitrión ni proveedor SDK")))
+    def markdown_spacing_is_valid(text: str) -> bool:
+        lines = text.splitlines()
+        if "<table" in text.lower():
+            return False
+        in_fence = False
+        for index, line in enumerate(lines):
+            if line.startswith("```"):
+                if not in_fence and index and lines[index - 1].strip():
+                    return False
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            is_table_start = line.startswith("|") and (index == 0 or not lines[index - 1].startswith("|"))
+            if (line.startswith("#") or is_table_start) and index and lines[index - 1].strip():
+                return False
+        return True
+
+    structure = all(markdown_spacing_is_valid(text) for text in readmes)
+    readme_contract = (
+        all(text.splitlines()[0] == switcher for text in readmes)
+        and headings == [expected_headings, expected_headings_fr, expected_headings_es]
+        and all(tagline in text and subline in text.replace("<br>", " ")
+                for text, (tagline, subline) in zip(readmes, taglines))
+        and all(command_lines(text) == commands for text in readmes[1:])
+        and all(all(option in text for option in options) for text in readmes[1:])
+        and section_content
+        and structure
+    )
+    release_contract = (
+        release.startswith("# Release notes — Video Digest (formerly video-analysis)\n\n"
+                           "## v0.7.0 — 2026-11-28 — Video Digest")
+        and all(term in release for term in (
+            "VIDEO_DIGEST_*", "VIDEO_ANALYSIS_*", "primary value takes precedence",
+            "DEFAULT_CHECKS=148", "FULL_CHECKS=150"))
+        and "openclaw" in release.lower()
+    )
     comments = all(term in docs for term in ("--comments 0", "commenter identity", "without names"))
     language = all(term in docs for term in ("user's requested", "--language", "sheet language"))
     migration = "regenerate sheet.json with the v0.6.0 brief" in docs
@@ -3336,7 +3423,8 @@ def check_v065_documentation_and_release_contract() -> bool:
         "fallback_reason", "captions:fr:auto"))
     sheets_contract = "optional contact sheets" in readme.lower() + skill.lower() + release.lower()
     no_ocr_reuse_claim = "ocr_reused" not in docs and "OCR reuse was tried, reused 0 of 306" in release
-    count_surfaces = [readme, release, test_docs, Path(__file__).read_text(encoding="utf-8")]
+    count_surfaces = [readme, readme_fr, readme_es, release, test_docs,
+                      Path(__file__).read_text(encoding="utf-8")]
     count_pins = []
     for key in ("DEFAULT_CHECKS", "FULL_CHECKS"):
         values = []
@@ -3345,10 +3433,11 @@ def check_v065_documentation_and_release_contract() -> bool:
             if not match:
                 return False
             values.append(match.group(1))
-        count_pins.append(len(set(values[:3])) == 1 and int(values[3]) == int(values[0]) + 3)
+        count_pins.append(len(set(values)) == 1)
     return all((release_contract, comments, language, migration, facts_cost,
                 editorial, structure, extraction_updates, release_measurement,
-                transcript_contract, sheets_contract, no_ocr_reuse_claim, *count_pins))
+                transcript_contract, sheets_contract, no_ocr_reuse_claim,
+                readme_contract, *count_pins))
 
 
 def check_host_detection_and_provenance() -> bool:
@@ -4010,9 +4099,9 @@ def main() -> int:
             "analyze_video forwards explicit host", check_analyze_video_forwards_explicit_host)
         checks["correction consent EOF and noninteractive stdout exit 4"] = run_check(
             "correction consent EOF and noninteractive stdout exit 4", check_consent_eof_and_noninteractive_stdout_exit_4)
-        checks["v0.6.5 documentation performance and measured-count contract"] = run_check(
-            "v0.6.5 documentation performance and measured-count contract",
-            check_v065_documentation_and_release_contract)
+        checks["v0.7.0 multilingual README and release contract"] = run_check(
+            "v0.7.0 multilingual README and release contract",
+            check_v070_multilingual_documentation_contract)
         checks["analyze_video correction order and flags"] = run_check(
             "analyze_video correction order and flags", check_analyze_video_correction_order_and_flags)
         checks["analyze_video stops on failure"] = run_check(

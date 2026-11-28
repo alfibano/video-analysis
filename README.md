@@ -161,7 +161,7 @@ Use `--no-correct` to keep correction offline. Fetching a URL is a separate netw
 
 ## Status
 
-v0.6.5 measured `DEFAULT_CHECKS=145` (145 passed, 0 failed) and `FULL_CHECKS=147` (147 passed,
+v0.7.0 measured `DEFAULT_CHECKS=148` (148 rows, 0 failed) and `FULL_CHECKS=150` (150 passed,
 0 failed). See [release notes](RELEASE_NOTES.md).
 
 ## License

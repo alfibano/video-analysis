@@ -1,4 +1,25 @@
-# Release notes — video-analysis
+# Release notes — Video Digest (formerly video-analysis)
+
+## v0.7.0 — 2026-11-28 — Video Digest
+
+### Changed
+- Renamed the project and tracked skill directory to Video Digest / `video-digest`; the repository
+  slug is now `video-digest`.
+- Added English, French, and Spanish READMEs with matching sections, commands, and language links.
+- Documented optional contact sheets and their extraction workflow.
+- `VIDEO_DIGEST_*` names are primary; deprecated `VIDEO_ANALYSIS_*` aliases remain supported.
+  When both values exist, the primary value takes precedence, including when it is empty.
+- Kept `.analysis` paths and existing manifest, bundle, and sheet schemas compatible.
+
+### Fixed
+- Added `openclaw` to the top-level analysis provider parser and retained provider forwarding; the
+  pipeline self-test covers it.
+- Routed `HOST_AI` to sheet preparation only, so it does not change transcript-correction locality.
+
+### Measured
+- Default self-test: `DEFAULT_CHECKS=148` (148 rows, 0 failed). `--full`:
+  `FULL_CHECKS=150` (150 passed, 0 failed).
+
 
 ## v0.6.5 — 2026-11-28 — caption-first analysis and faster transcription
 
@@ -347,10 +368,7 @@ read). Ordered by expected value.
 2. **SRT output** and word-level timestamps. Seen in: vidwise.
 3. **MCP server form** — same pipeline exposed to any agent, not only Claude Code.
    Seen in: talkthrough-mcp, media-context-mcp, VideoContext MCP.
-4. **Multilingual documentation** — README, docs and release notes in English (default), French
-   and Spanish at least, with a language switcher at the top of each page. Owner request,
-   2026-11-14.
-5. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
+4. **Local vision model** describing each frame (e.g. Qwen2.5-VL). Low priority: heavy on CPU and
    the agent already describes images. Seen in: Framesleuth.
 
 Survey sources: [claude-video](https://github.com/bradautomates/claude-video) ·
