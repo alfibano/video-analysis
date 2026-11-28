@@ -1,9 +1,9 @@
 ---
-name: video-analysis
+name: video-digest
 description: Analyse a local video file or one online video URL - what is SEEN (sampled frames, optional contact sheets, slide changes, exact-time frames) and what is SAID (offline timestamped transcript) - then describe both cross-referenced by timestamp. Use when the user asks to watch, read, analyse, summarise or extract rules from a video / mp4 / mkv / screen recording / course / webinar ("analyse cette vidéo", "lis la vidéo", "regarde cette vidéo", "que dit cette vidéo", "transcris la vidéo", "décortique la vidéo"). Local extraction works offline on Windows without system ffmpeg; transcript correction can use a configured AI service.
 ---
 
-# Video analysis — what is seen, what is said
+# Video Digest — what is seen, what is said
 
 You have **no direct video or audio input**. You read **images extracted from the video** and a
 **transcript of its audio**. Everything below turns a video into those two things, then tells you
@@ -21,7 +21,7 @@ Codex host, then OpenAI when an API key is present. Host providers use the signe
 no OpenAI key. For local media,
 ask the user before running correction with remote AI and pass `--allow-remote-ai` only after a yes.
 If the command exits 4, ask and rerun only after consent. Fetched public URLs are not asked. An
-explicitly declared local AI (`--ai-locality local` or `VIDEO_ANALYSIS_AI_LOCALITY=local`) with a
+explicitly declared local AI (`--ai-locality local` or `VIDEO_DIGEST_AI_LOCALITY=local`) with a
 base URL is not asked and needs no API key. Declaring local is a trust statement: a localhost proxy
 may still forward data online. Use `--no-correct` to keep correction fully offline.
 
@@ -29,13 +29,17 @@ Writing a study sheet can send the bundle's text, metadata, OCR, and selected fr
 remote host model. It does not send the raw video or audio. Local media requires consent during
 `prepare_sheet.py` before the host reads or writes sheet content; a fetched URL does not.
 
+Environment names use VIDEO_DIGEST_* as the primary prefix. The deprecated VIDEO_ANALYSIS_*
+alias remains a fallback for AI_LOCALITY, CORRECT_MODEL, CORRECT_PROVIDER, FFMPEG, HOST, HOST_AI,
+TEMP_DIR, and YTDLP; when both exist, the primary value wins, including an empty value.
+
 ## Transcript correction providers
 
 Select `--provider auto|claude-code|codex|openclaw|openai|local` (or
-`VIDEO_ANALYSIS_CORRECT_PROVIDER`). `--host claude-code|codex|openclaw` or
-`VIDEO_ANALYSIS_HOST` identifies the host whose configured model should guide correction. Auto
+`VIDEO_DIGEST_CORRECT_PROVIDER`). `--host claude-code|codex|openclaw` or
+`VIDEO_DIGEST_HOST` identifies the host whose configured model should guide correction. Auto
 prefers a detected Claude Code host, then Codex, then OpenAI when an API key exists. OpenClaw has no
-automatic host marker, so pass `--host openclaw` or set `VIDEO_ANALYSIS_HOST=openclaw`. Agents must
+automatic host marker, so pass `--host openclaw` or set `VIDEO_DIGEST_HOST=openclaw`. Agents must
 pass their known host explicitly to `analyze_video.py`. Without an available provider, correction
 records a skip.
 
@@ -44,7 +48,7 @@ low-cost sibling from the same model family. Claude Code uses its resolved Claud
 the model in its config/profile, and OpenClaw uses `agents.defaults.model.primary` from its config.
 Each host uses a known low-cost sibling when available; an unknown family uses that host's default.
 OpenAI SDK correction uses its configured model, and local SDK correction retains its SDK default.
-`--model` or `VIDEO_ANALYSIS_CORRECT_MODEL` explicitly selects a correction model. Before
+`--model` or `VIDEO_DIGEST_CORRECT_MODEL` explicitly selects a correction model. Before
 correction starts, stderr shows `AI selection:` with host, model (or `host default`), role
 (`low-cost` or `default`), reason, and locality. Tell the user those values before correction.
 
@@ -57,7 +61,7 @@ EOF or noninteractive output denies consent with exit 4.
 
 Host locality applies only when the selected provider is that host provider. An OpenAI or local SDK
 provider does not inherit locality from a detected host; correction locality comes from positive
-provider evidence or `--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY`. `VIDEO_ANALYSIS_HOST_AI` remains
+provider evidence or `--ai-locality` / `VIDEO_DIGEST_AI_LOCALITY`. `VIDEO_DIGEST_HOST_AI` remains
 the backward-compatible step-4 locality declaration and does not make correction local. Loopback
 URLs alone are remote. A local SDK endpoint requires a base URL and an explicit local trust
 declaration. Locality is a trust statement: a localhost proxy may still forward data online.
@@ -74,7 +78,7 @@ consenting if the local-media command requires it.
 The step-4 writer always uses the session default model, never the correction low-cost sibling.
 Before step-4 writing, tell the user the host, session default model, role `default`, reason, and
 locality. Step-4 locality uses the selected host provider's resolved locality or the explicit
-`--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration; `VIDEO_ANALYSIS_HOST_AI` remains its
+`--ai-locality` / `VIDEO_DIGEST_AI_LOCALITY` declaration; `VIDEO_DIGEST_HOST_AI` remains its
 backward-compatible declaration for this step. Codex may require network-enabled execution to
 reach its host service.
 
@@ -86,9 +90,9 @@ The owner deletes it when the work on that video is done, to reclaim disk space.
 **Never delete it yourself.** If asked to clean up, use the `trash` skill on exactly that folder
 (Recycle Bin, never `rm`). The study-sheet brief, JSON, and DOCX stay inside this folder.
 
-Temporary and self-test work goes in the installed skill's `video-analysis/_temp` folder. The whole
+Temporary and self-test work goes in the installed skill's `video-digest/_temp` folder. The whole
 `_temp` folder can be sent to the Recycle Bin when no run is in progress; scripts never delete it.
-Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
+Set `VIDEO_DIGEST_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
 Analysis outputs remain in `<video>.analysis/` next to the video.
 
 ## Primary entry points
@@ -106,14 +110,14 @@ Fetch progress and `OCR n/N` progress are bounded and printed on stderr.
 ## 1. Tools (once per machine)
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/setup_tools.py --check   # offline self-test only
-python ~/.claude/skills/video-analysis/scripts/setup_tools.py           # install what is missing
+python ~/.claude/skills/video-digest/scripts/setup_tools.py --check   # offline self-test only
+python ~/.claude/skills/video-digest/scripts/setup_tools.py           # install what is missing
 ```
 Installs only what is missing, with `pip --user` (no admin, no winget/choco): `Pillow`, `numpy`,
 `faster-whisper`, `rapidocr`, `yt-dlp[default]`, `openai`, `python-docx`, and `imageio-ffmpeg` (a bundled ffmpeg binary) only when no
 system ffmpeg is found; then caches the Whisper `small` model and warms OCR once so its model downloads
 during setup. Tool resolution: environment override
-(`VIDEO_ANALYSIS_FFMPEG`, `VIDEO_ANALYSIS_YTDLP`) → system PATH → bundled. YouTube also needs a
+(`VIDEO_DIGEST_FFMPEG`, `VIDEO_DIGEST_YTDLP`) → system PATH → bundled. YouTube also needs a
 JavaScript runtime (Deno, else Node). Normal setup prints `READY` only after setup and the offline
 self-test both succeed. `--check` runs only the offline self-test: it does not install tools, report
 readiness, or check the model cache.
@@ -130,19 +134,19 @@ audio never leaves the PC. Sizes `tiny`/`base`/`small`/`medium`: bigger = more a
 default `small` (best CPU trade-off), `medium` ≈3x slower (`--model medium`).
 
 Self-test (synthetic video and offline contract checks, `--full` adds Whisper):
-`python ~/.claude/skills/video-analysis/scripts/selftest.py`
+`python ~/.claude/skills/video-digest/scripts/selftest.py`
 
 Optional real URL check (downloads and extracts a video):
-`python ~/.claude/skills/video-analysis/scripts/selftest.py --network "<URL>"`
+`python ~/.claude/skills/video-digest/scripts/selftest.py --network "<URL>"`
 
 ## Secondary tools
 
 Study sheets use a separate host-writing turn after `analyze_video.py` has finished its bundle:
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/prepare_sheet.py "<video path>"
-python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>"
-python ~/.claude/skills/video-analysis/scripts/render_sheet.py "<video path>" --template "<template.docx>"
+python ~/.claude/skills/video-digest/scripts/prepare_sheet.py "<video path>"
+python ~/.claude/skills/video-digest/scripts/render_sheet.py "<video path>"
+python ~/.claude/skills/video-digest/scripts/render_sheet.py "<video path>" --template "<template.docx>"
 ```
 
 Pass the user's requested output language explicitly with `prepare_sheet.py --language <user language>`;
@@ -184,7 +188,7 @@ download. The video remains intact; SponsorBlock segments are marked in `sponsor
 never removed.
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/fetch_video.py "<URL>" --dest "<folder>"
+python ~/.claude/skills/video-digest/scripts/fetch_video.py "<URL>" --dest "<folder>"
 ```
 
 By default subtitles for the exact video language, base language, base-orig variant, and English are requested in order with duplicates removed. Choose languages explicitly with --sub-langs fr en. Compatible reruns refresh missing video-language captions without downloading the video again. The video downloads first; subtitles download in a separate
@@ -198,9 +202,9 @@ are never renamed.
 For a local video, or after fetching a URL, extract frames and transcript:
 
 ```bash
-python ~/.claude/skills/video-analysis/scripts/extract_video.py "<video path>" --language fr
-python ~/.claude/skills/video-analysis/scripts/correct_transcript.py "<video path>" --language fr
-python ~/.claude/skills/video-analysis/scripts/build_bundle.py "<video path>" --language fr
+python ~/.claude/skills/video-digest/scripts/extract_video.py "<video path>" --language fr
+python ~/.claude/skills/video-digest/scripts/correct_transcript.py "<video path>" --language fr
+python ~/.claude/skills/video-digest/scripts/build_bundle.py "<video path>" --language fr
 ```
 With `--transcribe auto` (the default), extraction uses the first usable video-language caption in
 this order: manual exact language, base language, base-orig; then automatic captions in the same
@@ -269,7 +273,7 @@ e. Write the analysis (step 4).
 
 The study-sheet agent procedure above owns the step-4 writing turn. Use the selected host session
 default model, and resolve locality from the selected host provider's positive locality evidence or
-an explicit `--ai-locality` / `VIDEO_ANALYSIS_AI_LOCALITY` declaration. `VIDEO_ANALYSIS_HOST_AI=local|remote`
+an explicit `--ai-locality` / `VIDEO_DIGEST_AI_LOCALITY` declaration. `VIDEO_DIGEST_HOST_AI=local|remote`
 remains a backward-compatible step-4 declaration and does not make correction local. A loopback URL
 alone is remote.
 

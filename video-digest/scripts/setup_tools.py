@@ -1,4 +1,4 @@
-"""Install and check video-analysis tools; run with -h for details."""
+"""Install and check Video Digest tools; run with -h for details."""
 from __future__ import annotations
 
 import argparse
@@ -245,7 +245,7 @@ def run_selftest() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=("Install missing video-analysis packages, verify tools, and warm OCR.\n"
+        description=("Install missing Video Digest packages, verify tools, and warm OCR.\n"
                      "--check runs only the default offline self-test without setup probes.\n"
                      "Normal setup may install packages or cache the Whisper model using the network.\n"
                      "Successful setup ends by running the default offline self-test."),

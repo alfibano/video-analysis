@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--correct-model", help="transcript correction model")
     parser.add_argument("--host", choices=("claude-code", "codex", "openclaw"), help="host providing AI models")
     parser.add_argument("--provider", choices=("auto", "claude-code", "codex", "openclaw", "openai", "local"),
-                        metavar="PROVIDER", help="transcript correction provider")
+                        metavar="PROVIDER", help="provider: auto, claude-code, codex, openclaw, openai, local")
     parser.add_argument("--retry-refused", action="store_true", help="retry refused correction chunks")
     parser.add_argument("--base-url", help="OpenAI-compatible correction endpoint")
     parser.add_argument("--ai-locality", choices=("local", "remote"), help="correction endpoint locality")

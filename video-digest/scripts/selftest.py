@@ -1,4 +1,4 @@
-"""Check the video-analysis tools and extraction flow; run with -h for details."""
+"""Check the Video Digest tools and extraction flow; run with -h for details."""
 from __future__ import annotations
 
 import argparse
@@ -32,7 +32,7 @@ CREATED_TEMP_FOLDERS: list[Path] = []
 
 
 def _temp_root() -> Path:
-    """App temp root (VIDEO_ANALYSIS_TEMP_DIR or the installed video-analysis/_temp)."""
+    """App temp root (VIDEO_DIGEST_TEMP_DIR, with VIDEO_ANALYSIS_TEMP_DIR as fallback)."""
     from tools import app_temp_dir
     return app_temp_dir()
 
@@ -240,7 +240,7 @@ def check_app_temp_folder() -> bool:
         pass
     else:
         return False
-    temp_folder = make_temp_folder("video-analysis-temp-check-")
+    temp_folder = make_temp_folder("video-digest-temp-check-")
     return temp_folder.parent == app_temp_dir()
 
 
@@ -263,7 +263,7 @@ def check_fetch_manifest() -> bool:
     except ImportError:
         return False
     from tools import make_temp_folder
-    dest = make_temp_folder("video-analysis-manifest-")
+    dest = make_temp_folder("video-digest-manifest-")
     info = {"_type": "video", "id": "test-id", "extractor_key": "Youtube", "title": "Sample video", "language": "fr",
             "webpage_url": "https://example.invalid/video", "duration": 12, "requested_downloads": []}
     video_name = f"{fetch_video.safe_video_stem(info['title'], info['id'])}.mp4"
@@ -618,7 +618,7 @@ def check_subtitle_failure_is_best_effort() -> bool:
     except ImportError:
         return False
     from tools import make_temp_folder
-    dest = make_temp_folder("video-analysis-subtitle-failure-")
+    dest = make_temp_folder("video-digest-subtitle-failure-")
     option_sets: list[dict] = []
     info = {"_type": "video", "id": "short-id", "title": "Short", "language": "en",
             "webpage_url": "https://example.invalid/short"}
@@ -674,7 +674,7 @@ def check_legacy_manifest() -> bool:
     except ImportError:
         return False
     from tools import make_temp_folder
-    folder = make_temp_folder("video-analysis-legacy-")
+    folder = make_temp_folder("video-digest-legacy-")
     (folder / "manifest.json").write_text(json.dumps({
         "source": {"path": "video.mp4"}, "params": {"interval": 5}, "stages": {},
     }), encoding="utf-8")
@@ -1376,7 +1376,7 @@ def check_default_docx_render() -> bool:
             and external_targets.count("https://example.com/one") == 1
             and external_targets.count("https://example.com/two") == 1
             and "59:09" in english_text and "17,379" in english_text and "n/a" in english_text
-            and doc.core_properties.author == "video-analysis"
+            and doc.core_properties.author == "video-digest"
             and doc.core_properties.created == FIXED_CORE_TIME
             and doc.core_properties.modified == FIXED_CORE_TIME)
 
@@ -3653,7 +3653,7 @@ def main() -> int:
     parser.add_argument("--full", action="store_true",
                         help="also run Whisper transcription and use its cached or downloaded model")
     parser.add_argument("--work-dir", type=Path,
-                        help="folder for synthetic video and analysis (default: a fresh folder in video-analysis/_temp)")
+                        help="folder for synthetic video and analysis (default: a fresh folder in video-digest/_temp)")
     parser.add_argument("--network", metavar="URL",
                         help="also fetch and extract one real online video URL")
     args = parser.parse_args()
@@ -3698,7 +3698,7 @@ def main() -> int:
     tempfile.TemporaryDirectory = TrackedTemporaryDirectory
     Path.mkdir = tracked_path_mkdir
     created_main_folder = args.work_dir is None or not args.work_dir.exists()
-    folder = args.work_dir or make_temp_folder("video-analysis-selftest-")
+    folder = args.work_dir or make_temp_folder("video-digest-selftest-")
     folder.mkdir(parents=True, exist_ok=True)
     if created_main_folder:
         record_temp_folder(folder)

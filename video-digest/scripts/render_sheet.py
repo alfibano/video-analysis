@@ -391,7 +391,7 @@ def render_document(sheet: Mapping[str, Any], *, analysis_dir: Path, facts: Mapp
             p = _paragraph(document); p.add_run(f"{reference['id']} : "); _hyperlink(p, reference["url"], reference["url"]); p.add_run(" — " + reference["title"])
     properties = document.core_properties
     properties.title = sheet["title"]
-    properties.author = "video-analysis"
+    properties.author = "video-digest"
     properties.created = FIXED_CORE_TIME
     properties.modified = FIXED_CORE_TIME
     return document
