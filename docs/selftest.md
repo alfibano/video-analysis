@@ -1,6 +1,6 @@
 # Self-test — `selftest.py`
 
-`video-analysis/scripts/selftest.py` checks the skill without a real video. The project has no
+`video-digest/scripts/selftest.py` checks the skill without a real video. The project has no
 pytest dependency: this script **is** its test suite. Its default run never imports `yt_dlp` or
 opens a network connection or calls an AI provider; correction coverage uses injected fake clients.
 A real URL run is explicit with `--network URL`. The default self-test makes zero provider calls.
@@ -55,7 +55,7 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 | subtitle failure does not fail the fetch | a fake yt-dlp raises during the subtitle pass; video and metadata remain available and the missing language is recorded |
 | v0.1 manifest remains compatible | older flat manifests are migrated to v2 in memory |
 | playlist and live are refused before download | a fake yt-dlp confirms preflight happens before downloading |
-| temporary folders live in the app _temp folder | test runs use the skill's `_temp` folder or `VIDEO_ANALYSIS_TEMP_DIR`, and scripts centralize temporary folder creation |
+| temporary folders live in the app _temp folder | test runs use the skill's `_temp` folder or `VIDEO_DIGEST_TEMP_DIR`, and scripts centralize temporary folder creation |
 | default selftest is offline | default checks keep yt-dlp lazy and do not call the network |
 | documentation contract current | usage docs mention fetch, tool checks, network self-test and `frames.json` |
 | manifest records local and URL source kinds | media provenance is explicit before consent evaluation |
@@ -89,7 +89,7 @@ A real URL run is explicit with `--network URL`. The default self-test makes zer
 
 ## v0.6.0 sheet checks
 
-Study-sheet fixtures are generated under `VIDEO_ANALYSIS_TEMP_DIR`: fake video and bundle/manifest,
+Study-sheet fixtures are generated under `VIDEO_DIGEST_TEMP_DIR`: fake video and bundle/manifest,
 a tiny PNG, valid `sheet.json`, and temporary `.docx`/`.dotx` templates. Tests use a fake
 `ConfigReader`; they read no real host configuration and call no provider, executable, or network.
 The DOCX checks inspect paragraph order and styles, image count, core properties, hyperlink
@@ -116,6 +116,10 @@ Measured release totals: `DEFAULT_CHECKS=145` (145 passed, 0 failed); `FULL_CHEC
 (147 passed, 0 failed; two full-mode transcription checks add to the default total).
 New v0.6.5 offline checks are named exactly: caption language expansion and fetch resume are lossless; usable captions create transcript and force-Whisper bypasses them; automatic caption transcript remains correctable; Whisper CUDA success records actual device; Whisper load failure falls back to CPU; Whisper iteration failure discards partial and falls back; CUDA PATH helper prepends existing NVIDIA bins once; setup installs GPU speech libraries only with a GPU; legacy extraction manifest resumes with default transcribe and device; contact sheets are opt-in and resume from completed frames; analyze_video forwards contact sheets only to extraction.
 
+The current environment and pipeline checks are named exactly: `VIDEO_DIGEST environment names
+override deprecated aliases`; `deprecated VIDEO_ANALYSIS environment aliases remain accepted`; and
+`analyze_video forwards openclaw provider`.
+
 On a green run, the self-test removes only tracked folders it created inside the app temp root and prints
 `test folders removed`. When any check fails, it prints `test folders retained for diagnosis` followed
 by their paths. `key_sheet_index` in the extraction manifest points readers to every key page, including
@@ -141,10 +145,10 @@ self-test without installation or readiness probes.
 ## Usage
 
 ```bash
-python video-analysis/scripts/selftest.py            # fast, no transcription (no model needed)
-python video-analysis/scripts/selftest.py --full     # requires a cached Whisper model
-python video-analysis/scripts/selftest.py --work-dir <folder>   # choose where test files go
-python video-analysis/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
+python video-digest/scripts/selftest.py            # fast, no transcription (no model needed)
+python video-digest/scripts/selftest.py --full     # requires a cached Whisper model
+python video-digest/scripts/selftest.py --work-dir <folder>   # choose where test files go
+python video-digest/scripts/selftest.py --network <URL>       # also fetch and extract a real URL
 ```
 
 The default suite uses fake OCR and correction clients for orchestration and runs a real OCR smoke
@@ -156,7 +160,9 @@ Network mode writes its download under `<work-dir>/network` (or the fresh test f
 
 ## Cleanup
 
-Test files go to a fresh folder in the installed skill's `video-analysis/_temp` folder (or `--work-dir`),
+Test files go to a fresh folder in the installed skill's `video-digest/_temp` folder (or `--work-dir`),
 printed at the end. The whole `_temp` folder can be sent to the Recycle Bin when no run is in progress;
 the script never deletes anything. Analysis outputs remain in `<video>.analysis/` next to the video.
-Set `VIDEO_ANALYSIS_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI runs.
+Set `VIDEO_DIGEST_TEMP_DIR` to an absolute path to redirect temporary work, e.g. for sandboxed or CI
+runs. Runtime settings use `VIDEO_DIGEST_*`; the deprecated `VIDEO_ANALYSIS_*` names remain accepted
+as fallback aliases, with the primary value taking precedence even when it is empty.

@@ -16,7 +16,7 @@ There is no description timestamp parser, no bundle.md, and no nearest-frame fal
 warms the model once, while `--skip-ocr` records an intentional omission.
 
 ## Vision
-Turn the `video-analysis` skill into a learning platform: from a local or online video, produce an
+Turn the `Video Digest` skill into a learning platform: from a local or online video, produce an
 editable Word `.docx` study sheet with introduction, summary, chapter-by-chapter text, multiple
 distinct screenshots when useful, and links to their time codes. PDF/PPTX and other formats remain
 later work. Scripts handle mechanical facts and accounting; the selected host session default model
